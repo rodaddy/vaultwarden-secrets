@@ -202,6 +202,9 @@ export interface VaultConfigFile {
   /** Default vault name (if not specified in config entries) */
   defaultVault?: string;
 
+  /** Default folder prefix for secrets (e.g., "Projects/myapp") */
+  defaultFolder?: string;
+
   /** Configuration version for migrations */
   version: string;
 }
