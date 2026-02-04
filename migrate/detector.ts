@@ -316,15 +316,92 @@ export function maskValue(value: string): string {
 }
 
 /**
+ * Deduplicate same-name secrets within a file, keeping last value (shell semantics)
+ * Returns deduplicated list and any conflicts for display
+ */
+export function deduplicateSameNameSecrets(
+  secrets: DiscoveredSecret[]
+): { deduplicated: DiscoveredSecret[]; conflicts: Map<string, DiscoveredSecret[]> } {
+  // Group by (sourcePath, name) to find same-name duplicates within a file
+  const byKey = new Map<string, DiscoveredSecret[]>();
+
+  for (const secret of secrets) {
+    const key = `${secret.sourcePath}:${secret.name}`;
+    const existing = byKey.get(key) || [];
+    existing.push(secret);
+    byKey.set(key, existing);
+  }
+
+  const deduplicated: DiscoveredSecret[] = [];
+  const conflicts = new Map<string, DiscoveredSecret[]>();
+
+  for (const [key, group] of byKey) {
+    if (group.length === 1) {
+      // No duplicates, keep as-is
+      deduplicated.push(group[0]);
+    } else {
+      // Multiple entries with same name - check if values differ
+      const uniqueValues = new Set(group.map(s => s.value));
+
+      if (uniqueValues.size === 1) {
+        // Same value, just keep last occurrence
+        deduplicated.push(group[group.length - 1]);
+      } else {
+        // Different values - this is a conflict
+        // Sort by line number (ascending), then take last (highest line = last in file)
+        const sorted = [...group].sort((a, b) => a.lineNumber - b.lineNumber);
+        const last = sorted[sorted.length - 1];
+        deduplicated.push(last);
+
+        // Store all values in reverse order (last/newest first) for display
+        conflicts.set(key, sorted.reverse());
+      }
+    }
+  }
+
+  return { deduplicated, conflicts };
+}
+
+/**
+ * Display conflicts to user
+ */
+function showConflicts(conflicts: Map<string, DiscoveredSecret[]>): void {
+  if (conflicts.size === 0) return;
+
+  console.log(yellow('\n⚠️  Same-name secrets with different values found:'));
+  console.log(dim('  Using last value (shell semantics). All values shown newest-first:\n'));
+
+  for (const [key, secrets] of conflicts) {
+    const name = secrets[0].name;
+    console.log(bold(`  ${name}:`));
+
+    secrets.forEach((s, idx) => {
+      const marker = idx === 0 ? green('→') : dim(' ');
+      const note = idx === 0 ? dim(' (will use)') : '';
+      console.log(`    ${marker} ${cyan(maskValue(s.value))} ${dim(`line ${s.lineNumber}`)}${note}`);
+    });
+    console.log('');
+  }
+}
+
+/**
  * Interactive prompt to confirm ambiguous secrets
  */
 export async function confirmSecrets(
   secrets: DiscoveredSecret[],
   interactive: boolean
 ): Promise<DiscoveredSecret[]> {
+  // First, deduplicate same-name secrets (keep last value per shell semantics)
+  const { deduplicated, conflicts } = deduplicateSameNameSecrets(secrets);
+
+  // Show any conflicts found
+  if (conflicts.size > 0) {
+    showConflicts(conflicts);
+  }
+
   if (!interactive) {
     // Auto-confirm high confidence, skip low
-    return secrets.map((s) => ({
+    return deduplicated.map((s) => ({
       ...s,
       confirmed: s.confidence === 'high' || s.confidence === 'medium',
       skipped: s.confidence === 'low',
@@ -341,7 +418,7 @@ export async function confirmSecrets(
 
   const confirmed: DiscoveredSecret[] = [];
 
-  for (const secret of secrets) {
+  for (const secret of deduplicated) {
     // Auto-confirm high confidence
     if (secret.confidence === 'high') {
       confirmed.push({ ...secret, confirmed: true });
