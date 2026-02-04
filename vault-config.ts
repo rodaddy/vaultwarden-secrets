@@ -1,27 +1,30 @@
 /**
  * Multi-vault configuration management
  *
- * Manages vault configurations stored at ~/.config/pai-private/.vw-config.json
+ * Manages vault configurations stored at ~/.config/vaultwarden-secrets/config.json
  * Provides CRUD operations for vault definitions and active vault tracking.
  *
  * @module vault-config
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { VaultConfig, VaultConfigFile, SecretError, ErrorCode } from './types';
-
-const CONFIG_PATH = join(homedir(), '.config/pai-private/.vw-config.json');
+import { dirname } from 'node:path';
+import { VaultConfig, VaultConfigFile, SecretError, ErrorCode, Constants } from './types';
 
 /**
  * Vault configuration manager
  *
  * Handles loading, saving, and manipulating vault configurations.
- * Stores configuration in ~/.config/pai-private/.vw-config.json
+ * Stores configuration in {VAULTWARDEN_SECRETS_DIR}/config.json
+ * Default: ~/.config/vaultwarden-secrets/config.json
  */
 export class VaultManager {
   private config: VaultConfigFile | null = null;
+  private configPath: string;
+
+  constructor(configPath?: string) {
+    this.configPath = configPath || Constants.CONFIG_PATH;
+  }
 
   /**
    * Load configuration from file
@@ -32,7 +35,7 @@ export class VaultManager {
   async loadConfig(): Promise<VaultConfigFile> {
     if (this.config) return this.config;
 
-    if (!existsSync(CONFIG_PATH)) {
+    if (!existsSync(this.configPath)) {
       // Return default config
       this.config = {
         vaults: {},
@@ -42,7 +45,7 @@ export class VaultManager {
     }
 
     try {
-      const content = readFileSync(CONFIG_PATH, 'utf-8');
+      const content = readFileSync(this.configPath, 'utf-8');
       this.config = JSON.parse(content);
       return this.config!;
     } catch (error) {
@@ -69,12 +72,12 @@ export class VaultManager {
 
     try {
       // Ensure parent directory exists
-      const dir = dirname(CONFIG_PATH);
+      const dir = dirname(this.configPath);
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
 
-      writeFileSync(CONFIG_PATH, JSON.stringify(this.config, null, 2), 'utf-8');
+      writeFileSync(this.configPath, JSON.stringify(this.config, null, 2), 'utf-8');
     } catch (error) {
       throw new SecretError(
         `Failed to save vault config: ${error instanceof Error ? error.message : String(error)}`,
