@@ -442,7 +442,23 @@ export async function getActiveVault(): Promise<string> {
  * }
  */
 export async function setSession(vaultId: string, token: string): Promise<void> {
+  // Store session in Keychain
   await setVaultSession(vaultId, token);
+
+  // Also register vault in config if not already there
+  const existingVault = await vaultManager.getVault(vaultId);
+  if (!existingVault) {
+    await vaultManager.setVault(vaultId, {
+      name: vaultId,
+      path: '',  // Not used for BW sessions
+      keychainItem: `session-${vaultId}`,
+    });
+    // Set as default if it's the first vault
+    const vaults = await vaultManager.listVaults();
+    if (vaults.length === 1) {
+      await vaultManager.switchVault(vaultId);
+    }
+  }
 }
 
 /**
