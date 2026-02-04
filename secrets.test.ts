@@ -612,7 +612,7 @@ describe('constants', () => {
     expect(Constants.SALT_LENGTH).toBe(32);
     expect(Constants.IV_LENGTH).toBe(12);
     expect(Constants.AUTH_TAG_LENGTH).toBe(16);
-    expect(Constants.DEFAULT_KEYCHAIN_SERVICE).toBe('pai-secrets');
+    expect(Constants.DEFAULT_KEYCHAIN_SERVICE).toBe('vaultwarden-secrets');
     expect(Constants.DEFAULT_VAULT_NAME).toBe('default');
   });
 });

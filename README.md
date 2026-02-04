@@ -32,6 +32,44 @@ bw login
 
 ## Installation
 
+### Quick Install
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/vaultwarden-secrets.git
+cd vaultwarden-secrets
+
+# Install dependencies
+bun install
+
+# Set up configuration directory
+bun run install-config
+```
+
+### PAI Users
+
+If you're using this with PAI (Personal AI) framework:
+
+```bash
+# Install to PAI private directory
+bun run install-pai
+```
+
+This automatically detects and uses `~/.config/pai-private/vaultwarden-secrets/` for all configuration.
+
+### Installation Options
+
+```bash
+# Preview what would be installed (dry-run)
+bun run install-config --dry-run
+
+# Install to custom directory
+bun run install.ts --path ~/.my-secrets
+
+# Uninstall
+bun run uninstall
+```
+
 ### From npm (when published)
 
 ```bash
@@ -44,6 +82,10 @@ bun add vaultwarden-secrets
 # Clone the repository
 git clone https://github.com/yourusername/vaultwarden-secrets.git
 cd vaultwarden-secrets
+
+# Install dependencies and set up config
+bun install
+bun run install-config
 
 # Link for local development
 bun link
@@ -373,12 +415,13 @@ try {
 
 - Stored in **macOS Keychain** (locked at system level)
 - Never written to disk in plaintext
-- Keychain service: `pai-secrets`
+- Keychain service: `vaultwarden-secrets`
 - Accessible only to authenticated user
 
 ### Cache Encryption
 
-- Cache file: `~/.config/pai-private/.vw-cache.json`
+- Cache file: `{VAULTWARDEN_SECRETS_DIR}/cache.json`
+- Default: `~/.config/vaultwarden-secrets/cache.json`
 - **AES-256-GCM** encryption (256-bit key)
 - **HMAC-SHA256** integrity verification
 - Each entry encrypted separately with unique IV
@@ -416,7 +459,7 @@ try {
         └────────┬───────────────────┘
                  │
         ┌────────▼──────────┐
-        │  Encrypt + Cache  │ ──► ~/.config/pai-private/.vw-cache.json
+        │  Encrypt + Cache  │ ──► {VAULTWARDEN_SECRETS_DIR}/cache.json
         │  Return Secret    │     (HMAC signed)
         └────────┬──────────┘
                  │
@@ -439,9 +482,50 @@ try {
 
 ## Configuration
 
+### Configuration Directory
+
+The library automatically detects the best configuration directory based on your setup:
+
+**Detection Priority (deepest first):**
+1. `VAULTWARDEN_SECRETS_DIR` environment variable (explicit override)
+2. `~/.config/pai-private/vaultwarden-secrets/` (PAI private - highest auto priority)
+3. `~/.config/pai/vaultwarden-secrets/` (PAI public)
+4. `~/.config/vaultwarden-secrets/` (standalone default)
+
+```
+~/.config/vaultwarden-secrets/
+├── config.json    # Vault configurations
+├── cache.json     # Encrypted cache
+└── vaults/        # Vault-specific data
+```
+
+**PAI Integration (Auto-Detection):**
+
+If you have PAI installed, the library automatically uses the PAI directory structure:
+
+```bash
+# Automatically detected if directory exists:
+~/.config/pai-private/vaultwarden-secrets/  # Private credentials (highest priority)
+~/.config/pai/vaultwarden-secrets/          # Public/shareable configs
+
+# No environment variable needed - just works!
+```
+
+**Manual Override:**
+
+You can explicitly set the location using the `VAULTWARDEN_SECRETS_DIR` environment variable:
+
+```bash
+# Force a specific location
+export VAULTWARDEN_SECRETS_DIR=~/.my-custom-secrets
+
+# Add to your shell profile (.zshrc, .bashrc)
+export VAULTWARDEN_SECRETS_DIR=~/.config/pai-private/vaultwarden-secrets
+```
+
 ### Vault Configuration
 
-Vaults are defined in `~/.config/pai/lib/secrets/config.json`:
+Vaults are defined in `{VAULTWARDEN_SECRETS_DIR}/config.json`:
 
 ```json
 {
@@ -450,14 +534,14 @@ Vaults are defined in `~/.config/pai/lib/secrets/config.json`:
   "vaults": {
     "default": {
       "name": "default",
-      "path": "~/.config/pai/lib/secrets/vaults/default",
+      "path": "{VAULTWARDEN_SECRETS_DIR}/vaults/default",
       "keychainItem": "session-default",
       "description": "Personal vault",
       "default": true
     },
     "work": {
       "name": "work",
-      "path": "~/.config/pai/lib/secrets/vaults/work",
+      "path": "{VAULTWARDEN_SECRETS_DIR}/vaults/work",
       "keychainItem": "session-work",
       "description": "Work vault"
     }
@@ -467,6 +551,7 @@ Vaults are defined in `~/.config/pai/lib/secrets/config.json`:
 
 ### Environment Variables
 
+- `VAULTWARDEN_SECRETS_DIR` – Custom configuration directory (default: `~/.config/vaultwarden-secrets`)
 - `BW_CLIENTID` – Bitwarden organization ID (if using organization account)
 - `BW_CLIENTSECRET` – Bitwarden organization secret (if using organization account)
 - `BW_IDENTITY` – Custom Bitwarden identity URL (for Vaultwarden self-hosted)

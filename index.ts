@@ -406,6 +406,21 @@ export async function setSession(vaultId: string, token: string): Promise<void> 
   await setVaultSession(vaultId, token);
 }
 
+/**
+ * List all configured vaults
+ *
+ * @returns Promise resolving to array of vault configurations
+ *
+ * @example
+ * const vaults = await listVaults();
+ * for (const vault of vaults) {
+ *   console.log(`${vault.name}: ${vault.description}`);
+ * }
+ */
+export async function listVaults() {
+  return vaultManager.listVaults();
+}
+
 // Re-export types and values for consumers
 export {
   SecretError,

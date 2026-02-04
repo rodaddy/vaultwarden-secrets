@@ -26,7 +26,8 @@ import { getMasterKey } from './keychain';
 /**
  * Cache file structure
  *
- * Stored at: ~/.config/pai-private/.vw-cache.json
+ * Stored at: {VAULTWARDEN_SECRETS_DIR}/cache.json
+ * Default: ~/.config/vaultwarden-secrets/cache.json
  *
  * Format:
  * {
@@ -78,11 +79,10 @@ export class SecretCache {
   /**
    * Create a new cache instance
    *
-   * @param cachePath - Path to cache file (default: ~/.config/pai-private/.vw-cache.json)
+   * @param cachePath - Path to cache file (default: from Constants.CACHE_PATH)
    */
   constructor(cachePath?: string) {
-    this.cachePath =
-      cachePath || join(homedir(), '.config/pai-private/.vw-cache.json');
+    this.cachePath = cachePath || Constants.CACHE_PATH;
   }
 
   /**

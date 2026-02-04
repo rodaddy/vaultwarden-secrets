@@ -193,7 +193,7 @@ export interface VaultConfig {
 /**
  * Full vault configuration file structure
  *
- * Located at: ~/.config/pai/lib/secrets/config.json
+ * Located at: ~/.config/vaultwarden-secrets/config.json
  */
 export interface VaultConfigFile {
   /** Map of vault name to vault config */
@@ -293,6 +293,60 @@ export const DEFAULT_TTLS: Record<SecretCategory, number> = {
 };
 
 /**
+ * Get the configuration directory for vaultwarden-secrets.
+ *
+ * Detection order (deepest first):
+ * 1. VAULTWARDEN_SECRETS_DIR env var (explicit override)
+ * 2. ~/.config/pai-private/vaultwarden-secrets/ (PAI private - highest auto priority)
+ * 3. ~/.config/pai/vaultwarden-secrets/ (PAI public)
+ * 4. ~/.config/vaultwarden-secrets/ (standalone default)
+ *
+ * @example
+ * // Default: ~/.config/vaultwarden-secrets
+ * const dir = getConfigDir();
+ *
+ * @example
+ * // PAI integration: auto-detects ~/.config/pai-private/vaultwarden-secrets
+ * const dir = getConfigDir();
+ *
+ * @example
+ * // Explicit override via env var
+ * process.env.VAULTWARDEN_SECRETS_DIR = '~/.config/custom-dir';
+ * const dir = getConfigDir(); // Returns ~/.config/custom-dir
+ *
+ * @returns Absolute path to config directory
+ */
+export function getConfigDir(): string {
+  const { existsSync } = require('node:fs');
+  const { homedir } = require('node:os');
+  const { join } = require('node:path');
+
+  // 1. Explicit override via env var
+  const customDir = process.env.VAULTWARDEN_SECRETS_DIR;
+  if (customDir) {
+    // Expand ~ to home directory if present
+    return customDir.replace(/^~/, homedir());
+  }
+
+  const home = homedir();
+
+  // 2. Check PAI private directory (highest auto priority)
+  const paiPrivate = join(home, '.config/pai-private/vaultwarden-secrets');
+  if (existsSync(paiPrivate)) {
+    return paiPrivate;
+  }
+
+  // 3. Check PAI public directory
+  const paiPublic = join(home, '.config/pai/vaultwarden-secrets');
+  if (existsSync(paiPublic)) {
+    return paiPublic;
+  }
+
+  // 4. Default for standalone users
+  return join(home, '.config/vaultwarden-secrets');
+}
+
+/**
  * System constants for secrets management
  */
 export const Constants = {
@@ -315,16 +369,22 @@ export const Constants = {
   AUTH_TAG_LENGTH: 16,
 
   /** Default keychain service name */
-  DEFAULT_KEYCHAIN_SERVICE: 'pai-secrets',
+  DEFAULT_KEYCHAIN_SERVICE: 'vaultwarden-secrets',
 
   /** Default vault name */
   DEFAULT_VAULT_NAME: 'default',
 
+  /** Configuration directory (can be overridden via VAULTWARDEN_SECRETS_DIR env var) */
+  get CONFIG_DIR() { return getConfigDir(); },
+
   /** Config file path */
-  CONFIG_PATH: '~/.config/pai/lib/secrets/config.json',
+  get CONFIG_PATH() { return require('node:path').join(getConfigDir(), 'config.json'); },
+
+  /** Cache file path */
+  get CACHE_PATH() { return require('node:path').join(getConfigDir(), 'cache.json'); },
 
   /** Default vaults directory */
-  VAULTS_DIR: '~/.config/pai/lib/secrets/vaults',
+  get VAULTS_DIR() { return require('node:path').join(getConfigDir(), 'vaults'); },
 } as const;
 
 // ============================================================================
