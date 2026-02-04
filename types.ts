@@ -202,6 +202,15 @@ export interface VaultConfigFile {
   /** Default vault name (if not specified in config entries) */
   defaultVault?: string;
 
+  /** Default folder prefix for secrets (e.g., "Projects/myapp") */
+  defaultFolder?: string;
+
+  /** Secret aliases for cross-project references (alias → target) */
+  aliases?: Record<string, string>;
+
+  /** Inheritance - project inherits secrets from another (project → parent) */
+  inherits?: Record<string, string>;
+
   /** Configuration version for migrations */
   version: string;
 }

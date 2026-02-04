@@ -131,6 +131,201 @@ const allFields = await getSecretObject('github-pat');
 // Returns: { username: '...', password: '...', uri: '...', API_KEY: '...' }
 ```
 
+## CLI Reference
+
+The `secret` command provides muscle-memory-friendly access to your secrets.
+
+### Installation
+
+```bash
+# Install globally
+bun link
+
+# Add shell integration to ~/.zshrc
+source ~/.config/pai/lib/secrets/shell/secret.sh
+```
+
+### Daily Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `secret <path>` | Get secret (shorthand) | `secret github-pat` |
+| `secret get <path>` | Get secret to stdout | `secret get "API Keys.OPENAI"` |
+| `secret copy <path>` | Copy to clipboard | `secret copy github-pat` |
+| `secret paste <path>` | Set from clipboard | `secret paste myapp.password` |
+| `secret set <path> [value]` | Set secret (prompts if no value) | `secret set myapp.token` |
+
+### Discovery Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `secret list [filter]` | List secrets | `secret list github` |
+| `secret search <query>` | Fuzzy search | `secret search postgres` |
+| `secret show <item>` | Show all fields (tree view) | `secret show "PostgreSQL"` |
+
+### Vault Management
+
+| Command | Description |
+|---------|-------------|
+| `secret vault list` | List available vaults |
+| `secret vault use <name>` | Switch active vault |
+| `secret vault current` | Show current vault |
+
+### Folder Prefix
+
+Organize secrets by project with folder prefixes:
+
+```bash
+# Set folder prefix
+secret folder myproject
+# Now "secret get API_KEY" looks up "myproject/API_KEY"
+
+# Show current folder
+secret folder
+# Output: myproject
+
+# Clear folder prefix
+secret folder clear
+```
+
+### Cache Management
+
+| Command | Description |
+|---------|-------------|
+| `secret cache clear` | Clear all cached secrets |
+| `secret cache stats` | Show hit/miss statistics |
+| `secret cache refresh` | Force refresh from VW |
+
+### System Commands
+
+| Command | Description |
+|---------|-------------|
+| `secret health` | Check bw CLI, session, connectivity |
+| `secret set-session <vault> <token>` | Store BW_SESSION in Keychain |
+| `secret version` | Show version |
+| `secret help` | Show help |
+
+### Path Syntax
+
+```bash
+# Default: password field
+secret get github-pat
+
+# Specific field
+secret get github-pat.login.username
+
+# Notes field (common for API keys)
+secret get "OpenAI API Key.notes"
+
+# Custom field
+secret get github-pat.fields.WEBHOOK_SECRET
+```
+
+## Shell Integration
+
+Add to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+source ~/.config/pai/lib/secrets/shell/secret.sh
+```
+
+### Muscle Memory Aliases
+
+| Alias | Expands To | Purpose |
+|-------|------------|---------|
+| `sg` | `secret get` | Get secret |
+| `sc` | `secret copy` | Copy to clipboard |
+| `ss` | `secret set` | Set secret |
+| `sl` | `secret list` | List secrets |
+| `sv` | `secret vault` | Vault commands |
+| `sth` | `secret health` | Health check |
+
+### Shell Functions
+
+```bash
+# Export secret to environment variable
+se "github-pat.fields.TOKEN" GITHUB_TOKEN
+# Exports GITHUB_TOKEN=<secret value>
+
+# Interactive picker (requires fzf)
+sp        # Pick and get
+sp copy   # Pick and copy to clipboard
+```
+
+### Tab Completion
+
+Tab completion is automatic for both bash and zsh after sourcing the shell file.
+
+## Migration Wizard
+
+Migrate secrets from `.env` files, shell configs, and scripts to Vaultwarden.
+
+### Basic Usage
+
+```bash
+# Scan current directory
+secret migrate
+
+# Scan specific paths
+secret migrate ~/.env ~/Development
+
+# Scan with depth limit
+secret migrate ~/projects --depth 2
+```
+
+### What It Scans
+
+- `.env`, `.env.local`, `.env.production` files
+- `.zshrc`, `.bashrc`, `.profile` configs
+- `*.sh` shell scripts
+- `*.json`, `*.yaml`, `*.yml`, `*.toml` configs
+
+### Detection Confidence
+
+| Level | Action | Examples |
+|-------|--------|----------|
+| **High** | Auto-confirmed | `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD` |
+| **Medium** | Prompted | `KEY`, `PASS`, `CRED`, `PRIV` |
+| **Low** | Skipped in auto mode | `URL`, `HOST`, `USER`, `DATABASE` |
+
+### Duplicate Handling
+
+When the same variable appears multiple times with different values:
+
+```
+⚠️  Same-name secrets with different values found:
+  Using last value (shell semantics). All values shown newest-first:
+
+  OPENAI_API_KEY:
+    → sk-new-key (line 45) (will use)
+      sk-old-key (line 12)
+```
+
+The **last value wins** (matches shell behavior).
+
+### Migration Output
+
+The wizard generates:
+
+1. **New file versions** with `$(secret get ...)` calls
+2. **VW import script** for batch creation
+3. **Cleanup summary** showing what can be removed
+
+### Output Locations
+
+```
+1. Side-by-side (.env → .env.migrated)
+2. Output folder (~/.config/pai/migrations/<date>/)
+3. In-place (backup original, replace with new)
+```
+
+### Dry Run
+
+```bash
+# Preview without making changes
+secret migrate ~/.env --dry-run
+```
+
 ## API Reference
 
 ### `getSecret(path, options?)`

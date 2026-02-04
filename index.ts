@@ -28,6 +28,38 @@ interface ExtendedParsedPath {
 }
 
 /**
+ * Apply folder prefix to path if needed
+ *
+ * Rule: If path contains '/', use as-is (explicit folder).
+ * Otherwise, prepend the default folder.
+ *
+ * @param path - Original path
+ * @param folder - Default folder prefix
+ * @returns Path with folder applied
+ *
+ * @example
+ * applyFolder('postgres', 'Projects/myapp') // 'Projects/myapp/postgres'
+ * applyFolder('work/postgres', 'Projects/myapp') // 'work/postgres' (explicit)
+ * applyFolder('postgres.password', 'Projects/myapp') // 'Projects/myapp/postgres.password'
+ */
+function applyFolder(path: string, folder: string): string {
+  if (!folder) return path;
+
+  // Extract item part (before first dot) to check for slash
+  const dotIndex = path.indexOf('.');
+  const itemPart = dotIndex >= 0 ? path.slice(0, dotIndex) : path;
+  const fieldPart = dotIndex >= 0 ? path.slice(dotIndex) : '';
+
+  // If item already has a folder (contains /), use as-is
+  if (itemPart.includes('/')) {
+    return path;
+  }
+
+  // Prepend folder to item
+  return `${folder}/${itemPart}${fieldPart}`;
+}
+
+/**
  * Parse secret path like "Item.field" or "Item.fields.CUSTOM"
  *
  * @param path - Secret path to parse
@@ -89,12 +121,15 @@ export async function getSecret(
   path: string,
   options: SecretOptions = {}
 ): Promise<string> {
-  const parsed = parseSecretPath(path);
+  // Apply folder prefix if path doesn't have explicit folder
+  const folder = await vaultManager.getFolder();
+  const resolvedPath = applyFolder(path, folder);
+  const parsed = parseSecretPath(resolvedPath);
   const vaultId = options.vault || await vaultManager.getActiveVault();
 
   // Check cache first (unless bypassed)
   if (!options.skipCache) {
-    const cached = await secretCache.get(path, vaultId);
+    const cached = await secretCache.get(resolvedPath, vaultId);
     if (cached !== null) {
       return cached;
     }
@@ -154,7 +189,7 @@ export async function getSecret(
     }
 
     // Cache the result
-    await secretCache.set(path, value, vaultId, options.category);
+    await secretCache.set(resolvedPath, value, vaultId, options.category);
 
     return value;
   } catch (error) {
@@ -202,6 +237,10 @@ export async function getSecretObject(
   itemName: string,
   options: SecretOptions = {}
 ): Promise<Record<string, string>> {
+  // Apply folder prefix if item doesn't have explicit folder
+  const folder = await vaultManager.getFolder();
+  const resolvedItem = itemName.includes('/') ? itemName : (folder ? `${folder}/${itemName}` : itemName);
+
   const vaultId = options.vault || await vaultManager.getActiveVault();
   const session = await getVaultSession(vaultId);
 
@@ -213,7 +252,7 @@ export async function getSecretObject(
   }
 
   try {
-    const result = await $`BW_SESSION=${session} bw get item ${itemName}`.quiet();
+    const result = await $`BW_SESSION=${session} bw get item ${resolvedItem}`.quiet();
     const item = JSON.parse(result.stdout.toString());
 
     const obj: Record<string, string> = {};
@@ -403,7 +442,80 @@ export async function getActiveVault(): Promise<string> {
  * }
  */
 export async function setSession(vaultId: string, token: string): Promise<void> {
+  // Store session in Keychain
   await setVaultSession(vaultId, token);
+
+  // Also register vault in config if not already there
+  const existingVault = await vaultManager.getVault(vaultId);
+  if (!existingVault) {
+    await vaultManager.setVault(vaultId, {
+      name: vaultId,
+      path: '',  // Not used for BW sessions
+      keychainItem: `session-${vaultId}`,
+    });
+    // Set as default if it's the first vault
+    const vaults = await vaultManager.listVaults();
+    if (vaults.length === 1) {
+      await vaultManager.switchVault(vaultId);
+    }
+  }
+}
+
+/**
+ * List all configured vaults
+ *
+ * @returns Promise resolving to array of vault configurations
+ *
+ * @example
+ * const vaults = await listVaults();
+ * for (const vault of vaults) {
+ *   console.log(`${vault.name}: ${vault.description}`);
+ * }
+ */
+export async function listVaults() {
+  return vaultManager.listVaults();
+}
+
+/**
+ * Get default folder prefix
+ *
+ * @returns Promise resolving to folder prefix or empty string
+ *
+ * @example
+ * const folder = await getFolder();
+ * console.log(`Current folder: ${folder || '(none)'}`);
+ */
+export async function getFolder(): Promise<string> {
+  return vaultManager.getFolder();
+}
+
+/**
+ * Set default folder prefix
+ *
+ * When set, all secret lookups without explicit folder (no '/') will
+ * use this prefix. e.g., getSecret('postgres') becomes getSecret('folder/postgres')
+ *
+ * @param folder - Folder path (e.g., "Projects/myapp")
+ *
+ * @example
+ * await setFolder('Projects/myapp');
+ * await getSecret('postgres'); // looks up "Projects/myapp/postgres"
+ */
+export async function setFolder(folder: string): Promise<void> {
+  await vaultManager.setFolder(folder);
+}
+
+/**
+ * Clear default folder prefix
+ *
+ * After clearing, all lookups use the exact path provided.
+ *
+ * @example
+ * await clearFolder();
+ * await getSecret('postgres'); // looks up "postgres" directly
+ */
+export async function clearFolder(): Promise<void> {
+  await vaultManager.clearFolder();
 }
 
 /**

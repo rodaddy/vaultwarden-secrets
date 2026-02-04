@@ -190,6 +190,36 @@ export class VaultManager {
   clearCache(): void {
     this.config = null;
   }
+
+  /**
+   * Get default folder prefix
+   *
+   * @returns Promise resolving to folder prefix or empty string
+   */
+  async getFolder(): Promise<string> {
+    const config = await this.loadConfig();
+    return config.defaultFolder || '';
+  }
+
+  /**
+   * Set default folder prefix
+   *
+   * @param folder - Folder path (e.g., "Projects/myapp")
+   */
+  async setFolder(folder: string): Promise<void> {
+    const config = await this.loadConfig();
+    config.defaultFolder = folder;
+    await this.saveConfig();
+  }
+
+  /**
+   * Clear default folder prefix
+   */
+  async clearFolder(): Promise<void> {
+    const config = await this.loadConfig();
+    delete config.defaultFolder;
+    await this.saveConfig();
+  }
 }
 
 // Singleton instance
