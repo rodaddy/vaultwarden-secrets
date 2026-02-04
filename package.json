@@ -1,0 +1,44 @@
+{
+  "name": "vaultwarden-secrets",
+  "version": "1.0.0",
+  "description": "Secure secrets management library with Vaultwarden/Bitwarden CLI integration, macOS Keychain storage, and encrypted caching",
+  "author": "Rico",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/vaultwarden-secrets"
+  },
+  "keywords": [
+    "vaultwarden",
+    "bitwarden",
+    "secrets",
+    "password-manager",
+    "keychain",
+    "encryption",
+    "aes-256-gcm",
+    "cli",
+    "typescript",
+    "bun"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bun x tsc --noEmit",
+    "example": "bun run example.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "files": [
+    "*.ts",
+    "!*.test.ts",
+    "!example.ts"
+  ]
+}
