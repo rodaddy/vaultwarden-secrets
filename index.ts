@@ -28,7 +28,7 @@ interface ExtendedParsedPath {
 }
 
 /**
- * Apply folder prefix to path if needed (TEST CHANGE)
+ * Apply folder prefix to path if needed
  *
  * Rule: If path contains '/', use as-is (explicit folder).
  * Otherwise, prepend the default folder.
@@ -60,7 +60,7 @@ function applyFolder(path: string, folder: string): string {
 }
 
 /**
- * Parse secret path like "Item.field" or "Item.fields.CUSTOM"
+ * Parse secret path with support for standard and custom fields
  *
  * @param path - Secret path to parse
  * @returns Parsed path components
