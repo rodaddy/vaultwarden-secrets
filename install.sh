@@ -141,6 +141,101 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Check if command exists
+command_exists() {
+    command -v "$1" &> /dev/null
+}
+
+# Detect operating system
+detect_os() {
+    case "$(uname -s)" in
+        Darwin*)
+            OS="macos"
+            if command_exists brew; then
+                PKG_MANAGER="brew"
+            fi
+            ;;
+        Linux*)
+            OS="linux"
+            if command_exists apt-get; then
+                PKG_MANAGER="apt"
+            elif command_exists dnf; then
+                PKG_MANAGER="dnf"
+            elif command_exists yum; then
+                PKG_MANAGER="yum"
+            elif command_exists pacman; then
+                PKG_MANAGER="pacman"
+            fi
+            ;;
+        *)
+            OS="unknown"
+            ;;
+    esac
+    print_color "$GREEN" "✓ Detected: $OS${PKG_MANAGER:+ ($PKG_MANAGER)}"
+}
+
+# Install bun runtime
+install_bun() {
+    if command_exists bun; then
+        print_color "$GREEN" "✓ bun already installed: $(bun --version)"
+        return 0
+    fi
+
+    print_color "$BLUE" "→ Installing bun..."
+
+    if [[ "$DRY_RUN" == true ]]; then
+        print_color "$DIM" "  Would run: curl -fsSL https://bun.sh/install | bash"
+        return 0
+    fi
+
+    curl -fsSL https://bun.sh/install | bash
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+
+    if command_exists bun; then
+        print_color "$GREEN" "✓ bun installed successfully"
+    else
+        print_color "$RED" "✗ bun installation failed"
+        return 1
+    fi
+}
+
+# Install Bitwarden CLI
+install_bw() {
+    if command_exists bw; then
+        print_color "$GREEN" "✓ Bitwarden CLI already installed: $(bw --version)"
+        return 0
+    fi
+
+    print_color "$BLUE" "→ Installing Bitwarden CLI..."
+
+    if [[ "$DRY_RUN" == true ]]; then
+        print_color "$DIM" "  Would install bitwarden-cli via $PKG_MANAGER"
+        return 0
+    fi
+
+    case "$PKG_MANAGER" in
+        brew)
+            brew install bitwarden-cli
+            ;;
+        apt)
+            sudo snap install bw
+            ;;
+        *)
+            print_color "$YELLOW" "⚠ Please install Bitwarden CLI manually:"
+            print_color "$DIM" "  https://bitwarden.com/help/cli/"
+            return 1
+            ;;
+    esac
+
+    if command_exists bw; then
+        print_color "$GREEN" "✓ Bitwarden CLI installed successfully"
+    else
+        print_color "$RED" "✗ Bitwarden CLI installation failed"
+        return 1
+    fi
+}
+
 # Detect PAI installation
 detect_pai() {
     if [[ "$PAI_MODE" == "none" ]]; then
@@ -256,8 +351,95 @@ install_source() {
         fi
 
         mkdir -p "$INSTALL_DIR"
-        cp -r . "$INSTALL_DIR/"
+        # Use rsync to handle permissions and exclude unnecessary files
+        rsync -a --delete \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.reports' \
+            --exclude='.working' \
+            . "$INSTALL_DIR/"
         print_color "$GREEN" "✓ Source installed successfully"
+    fi
+}
+
+# Create symlink to make 'secret' available in PATH
+setup_binary_symlink() {
+    local bin_dir="$HOME/.local/bin"
+    local target_binary="$INSTALL_DIR/bin/secret"
+    local symlink_path="$bin_dir/secret"
+
+    print_color "$BLUE" "→ Setting up binary symlink..."
+
+    if [[ "$DRY_RUN" == true ]]; then
+        print_color "$DIM" "  Would create: $symlink_path → $target_binary"
+        print_color "$DIM" "  Would add $bin_dir to PATH in shell rc"
+        return 0
+    fi
+
+    # Create bin directory if needed
+    mkdir -p "$bin_dir"
+
+    # Remove existing symlink or file
+    if [[ -L "$symlink_path" ]] || [[ -f "$symlink_path" ]]; then
+        rm -f "$symlink_path"
+    fi
+
+    # Create symlink
+    ln -s "$target_binary" "$symlink_path"
+    print_color "$GREEN" "✓ Created symlink: $symlink_path"
+
+    # Check if ~/.local/bin is in PATH
+    local shell_rc=""
+    if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == *zsh ]]; then
+        shell_rc="$HOME/.zshrc"
+    elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == *bash ]]; then
+        shell_rc="$HOME/.bashrc"
+    fi
+
+    if [[ -n "$shell_rc" ]]; then
+        if ! grep -q 'export PATH=.*\.local/bin' "$shell_rc" 2>/dev/null && \
+           ! grep -q 'PATH=.*\.local/bin' "$shell_rc" 2>/dev/null; then
+            echo "" >> "$shell_rc"
+            echo '# Local binaries' >> "$shell_rc"
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_rc"
+            print_color "$GREEN" "✓ Added ~/.local/bin to PATH in $shell_rc"
+        else
+            print_color "$GREEN" "✓ ~/.local/bin already in PATH"
+        fi
+    fi
+}
+
+# Compile biometric authentication helper (macOS only)
+compile_biometric_auth() {
+    # Only on macOS
+    if [[ "$OSTYPE" != "darwin"* ]]; then
+        print_color "$DIM" "  Biometric auth: skipped (macOS only)"
+        return 0
+    fi
+
+    local swift_source="$INSTALL_DIR/bin/biometric-auth.swift"
+    local binary_target="$INSTALL_DIR/bin/biometric-auth"
+
+    if [[ ! -f "$swift_source" ]]; then
+        print_color "$DIM" "  Biometric auth: source not found"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        print_color "$DIM" "  Would compile: $swift_source → $binary_target"
+        return 0
+    fi
+
+    print_color "$BLUE" "→ Compiling Touch ID / Apple Watch authentication..."
+
+    if swiftc -O -o "$binary_target" "$swift_source" \
+        -framework LocalAuthentication -framework Security 2>/dev/null; then
+        chmod +x "$binary_target"
+        print_color "$GREEN" "✓ Biometric auth compiled successfully"
+        print_color "$DIM" "  Enable with: secret unlock --save"
+    else
+        print_color "$YELLOW" "⚠ Biometric auth compilation failed (optional feature)"
+        print_color "$DIM" "  You can still use password-based unlock"
     fi
 }
 
@@ -321,8 +503,12 @@ configure_bitwarden() {
     if [[ "$current_server" == "$VAULT_SERVER" ]]; then
         print_color "$GREEN" "✓ Already configured for $VAULT_SERVER"
     else
-        bw config server "$VAULT_SERVER"
-        print_color "$GREEN" "✓ Configured for $VAULT_SERVER"
+        if bw config server "$VAULT_SERVER" 2>&1 | grep -q "Logout required"; then
+            print_color "$YELLOW" "⚠ Server already configured (logout required to change)"
+            print_color "$DIM" "  Current server: $current_server"
+        else
+            print_color "$GREEN" "✓ Configured for $VAULT_SERVER"
+        fi
     fi
 }
 
@@ -446,7 +632,15 @@ do_install() {
     install_source
     echo
 
-    # 5. Setup config directory
+    # 5. Setup binary symlink
+    setup_binary_symlink
+    echo
+
+    # 6. Compile biometric auth (macOS)
+    compile_biometric_auth
+    echo
+
+    # 7. Setup config directory
     print_color "$BOLD" "Setting up configuration..."
     echo
     determine_config_dir
@@ -487,13 +681,13 @@ do_install() {
 
     echo
 
-    # 6. Setup shell integration
+    # 8. Setup shell integration
     print_color "$BOLD" "Setting up shell integration..."
     echo
     setup_shell_integration
     echo
 
-    # 7. Configure Bitwarden
+    # 9. Configure Bitwarden
     print_color "$BOLD" "Configuring Bitwarden CLI..."
     echo
     configure_bitwarden
@@ -511,9 +705,9 @@ do_install() {
         echo
         print_color "$BOLD" "Next steps:"
         print_color "$DIM" "  1. Login to vault:        bw login your@email.com"
-        print_color "$DIM" "  2. Save session token:    export BW_SESSION=\"...\""
-        print_color "$DIM" "  3. Store session:         secret set-session default \"\$BW_SESSION\""
-        print_color "$DIM" "  4. Test a secret:         secret get \"Item Name\""
+        print_color "$DIM" "  2. Unlock with Touch ID:  secret unlock --save"
+        print_color "$DIM" "     (or manual:            secret unlock)"
+        print_color "$DIM" "  3. Test a secret:         secret get \"Item Name\""
         echo
         print_color "$BOLD" "Installed at:"
         print_color "$DIM" "  Source:  $INSTALL_DIR"
