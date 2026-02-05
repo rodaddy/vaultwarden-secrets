@@ -79,8 +79,8 @@ export const SecurityProfiles = {
     refreshTokens: true,
   },
 
-  openclaw: {
-    name: 'OpenClaw / Clawdbot',
+  'trust-no-one': {
+    name: 'Trust No One',
     description: 'MAXIMUM PARANOIA - Multi-layer defense in depth',
     auth: 'mtls+jwt',
     ipWhitelist: ['127.0.0.1/32'], // Localhost only, must add IPs explicitly
@@ -104,18 +104,39 @@ export const SecurityProfiles = {
   },
 } as const satisfies Record<string, SecurityProfile>;
 
+/**
+ * Profile aliases - for backwards compatibility and fun
+ * All point to trust-no-one (the maximum paranoia profile)
+ */
+export const ProfileAliases: Record<string, keyof typeof SecurityProfiles> = {
+  'openclaw': 'trust-no-one',
+  'tinfoil-hat': 'trust-no-one',
+  'maximum-paranoia': 'trust-no-one',
+  'aluminum-foil': 'trust-no-one',
+  'aluminium-hat': 'trust-no-one',
+  'fort-knox': 'trust-no-one',
+};
+
 export type ProfileName = keyof typeof SecurityProfiles;
 
 /**
  * Get security profile by name with validation
+ * Supports aliases for backwards compatibility
  */
 export function getProfile(name: string): SecurityProfile {
-  if (!(name in SecurityProfiles)) {
+  // Check for alias first
+  const resolvedName = ProfileAliases[name] || name;
+
+  if (!(resolvedName in SecurityProfiles)) {
+    const allOptions = [
+      ...Object.keys(SecurityProfiles),
+      ...Object.keys(ProfileAliases),
+    ].join(', ');
     throw new Error(
-      `Unknown security profile: ${name}. Valid options: ${Object.keys(SecurityProfiles).join(', ')}`
+      `Unknown security profile: ${name}. Valid options: ${allOptions}`
     );
   }
-  return SecurityProfiles[name as ProfileName];
+  return SecurityProfiles[resolvedName as ProfileName];
 }
 
 /**

@@ -15,7 +15,7 @@ Comprehensive end-to-end security testing of all four security profiles.
 | `feeling-lucky` | 34 | 97% | N/A (dev only) | ✅ Approved for development |
 | `im-aware` | 35 | 100% | A | ✅ Approved for homelab |
 | `im-a-dev` | 25 | 88% | A | ✅ Approved for production |
-| `openclaw` | 23 | 95.7% | A+ | ✅ Approved (after fixes) |
+| `trust-no-one` | 23 | 95.7% | A+ | ✅ Approved (after fixes) |
 
 **Critical Vulnerabilities Found:** 0
 **Bugs Found:** 3 (all fixed)
@@ -301,7 +301,9 @@ curl -X POST http://localhost:3002/auth/token \
 
 ---
 
-# Profile: `openclaw`
+# Profile: `trust-no-one`
+
+> **Aliases:** `openclaw`, `tinfoil-hat`, `maximum-paranoia`, `aluminum-foil`, `aluminium-hat`, `fort-knox`
 
 **Purpose:** Maximum paranoia - Multi-layer defense in depth
 **Server Port:** 3001
@@ -363,7 +365,7 @@ Layer 6: Forensic Audit Logging
 
 **Critical Finding:** No bypass possible. Both layers must pass.
 
-### JWT Validation in openclaw ✅
+### JWT Validation in trust-no-one ✅
 
 | Test | Expected | Actual | Result |
 |------|----------|--------|--------|
@@ -465,7 +467,7 @@ X-RateLimit-Reset: 2026-02-05T19:00:00.000Z
 ## Bug 3: Fingerprint Case Normalization
 
 **Severity:** Low
-**Affected:** openclaw profile
+**Affected:** trust-no-one profile
 **Issue:** Uppercase fingerprints were double-prefixed
 
 **Before:**
@@ -504,7 +506,7 @@ Result: sha256:d1f4ea... (normalized, accepted)
 | feeling-lucky | None | None | None | Basic | N/A |
 | im-aware | Bearer | TLS | 100/min | Standard | A |
 | im-a-dev | OAuth2/JWT | TLS | 60/min | Detailed | A |
-| openclaw | mTLS+JWT | E2E | 30/min | Forensic | A+ |
+| trust-no-one | mTLS+JWT | E2E | 30/min | Forensic | A+ |
 
 ---
 
@@ -528,7 +530,7 @@ Result: sha256:d1f4ea... (normalized, accepted)
 - Store client secrets securely
 - Consider adding PKCE for public clients
 
-### openclaw
+### trust-no-one
 - Rotate client certificates annually
 - Keep fingerprint allowlist minimal
 - Monitor forensic audit logs
@@ -568,7 +570,7 @@ SECURITY_PROFILE=im-aware API_TOKEN_TEST=token bun run server/main.ts &
 All security profiles pass comprehensive testing with no critical vulnerabilities.
 
 **Key Achievements:**
-- ✅ Defense in depth (openclaw)
+- ✅ Defense in depth (trust-no-one)
 - ✅ RFC compliance (OAuth2, Bearer auth)
 - ✅ Proper error handling (4xx codes, clear messages)
 - ✅ Attack resistance (injection, spoofing, timing)

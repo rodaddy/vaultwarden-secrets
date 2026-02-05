@@ -11,7 +11,22 @@ Choose based on your deployment environment:
 | **feeling-lucky** | None | Auto (local /24) | Dev/testing only | `bun run server:dev` |
 | **im-aware** | Bearer token | Auto (local /24) | Homelab/internal | `bun run server:prod` |
 | **im-a-dev** | OAuth2 | Auto (local /24) | Production web apps | `SECURITY_PROFILE=im-a-dev bun run server` |
-| **openclaw** | mTLS + JWT | 127.0.0.1/32 only | Maximum security | `SECURITY_PROFILE=openclaw bun run server` |
+| **trust-no-one** | mTLS + JWT | 127.0.0.1/32 only | Maximum security | `SECURITY_PROFILE=trust-no-one bun run server` |
+
+### Profile Aliases (for `trust-no-one`)
+
+The maximum security profile has several aliases for backwards compatibility and fun:
+
+| Alias | Points To |
+|-------|-----------|
+| `openclaw` | trust-no-one |
+| `tinfoil-hat` | trust-no-one |
+| `maximum-paranoia` | trust-no-one |
+| `aluminum-foil` | trust-no-one |
+| `aluminium-hat` | trust-no-one |
+| `fort-knox` | trust-no-one |
+
+Use any of these: `SECURITY_PROFILE=tinfoil-hat bun run server`
 
 **Network Auto-Detection:**
 All profiles except `openclaw` automatically detect your local network and whitelist it. For example, if the server's IP is 192.168.1.50, it will whitelist 192.168.1.0/24.
@@ -44,7 +59,7 @@ curl -H "Authorization: Bearer secret-token-for-postgres" \
   https://secrets.rodaddy.live/secret/MyPassword
 ```
 
-### 3. Maximum Security (OpenClaw - mTLS + JWT)
+### 3. Maximum Security (Trust No One - mTLS + JWT)
 ```bash
 # Generate certificates (one-time setup)
 cd deploy
@@ -52,7 +67,7 @@ cd deploy
 # This creates: ca.crt, server.crt, client.crt, and certs.json
 
 # Configure environment
-export SECURITY_PROFILE=openclaw
+export SECURITY_PROFILE=trust-no-one  # or: tinfoil-hat, openclaw, fort-knox
 export ALLOWED_CLIENT_CERTS="/opt/vaultwarden-secrets/tls/certs.json"
 export JWT_SECRET="$(openssl rand -hex 32)"
 
@@ -116,9 +131,9 @@ Response:
 | `API_TOKEN_<CLIENT>` | Bearer tokens for clients | Yes (im-aware profile) |
 | `OAUTH_CLIENT_ID` | OAuth2 client ID | Yes (im-a-dev profile) |
 | `OAUTH_CLIENT_SECRET` | OAuth2 client secret | Yes (im-a-dev profile) |
-| `ALLOWED_CLIENT_CERTS` | Path to certs.json | Yes (openclaw profile) |
+| `ALLOWED_CLIENT_CERTS` | Path to certs.json | Yes (trust-no-one profile) |
 | `ALLOWED_CERT_FINGERPRINTS` | Inline cert fingerprints | Alternative to ALLOWED_CLIENT_CERTS |
-| `JWT_SECRET` | JWT signing secret | Yes (openclaw/im-a-dev) |
+| `JWT_SECRET` | JWT signing secret | Yes (trust-no-one/im-a-dev) |
 | `MTLS_MODE` | direct or proxy | No (default: proxy) |
 | `MTLS_HEADER` | Header name for proxy mode | No (default: X-Client-Cert-Fingerprint) |
 | `NODE_ENV` | production prevents feeling-lucky | No |
@@ -165,7 +180,7 @@ server {
 }
 ```
 
-**mTLS (OpenClaw):**
+**mTLS (Trust No One):**
 See [deploy/nginx-mtls.conf](../deploy/nginx-mtls.conf) for full mTLS configuration with client certificate validation.
 
 ## Roadmap
