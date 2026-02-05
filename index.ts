@@ -60,7 +60,7 @@ function applyFolder(path: string, folder: string): string {
 }
 
 /**
- * Parse secret path with support for standard and custom fields
+ * Parse secret path with support for both standard and custom fields (ENFORCEMENT TEST)
  *
  * @param path - Secret path to parse
  * @returns Parsed path components
