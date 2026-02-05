@@ -930,7 +930,7 @@ encrypted file caching, and Vaultwarden CLI integration.
 
 # Interface: SecretOptions
 
-Defined in: [types.ts:268](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L268)
+Defined in: [types.ts:268](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L268)
 
 Options for getSecret() function
 
@@ -951,7 +951,7 @@ await getSecret('github-pat.token', {
 
 > `optional` **category**: [`SecretCategory`](../type-aliases/SecretCategory.md)
 
-Defined in: [types.ts:273](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L273)
+Defined in: [types.ts:273](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L273)
 
 Secret category for TTL (default: 'other')
 
@@ -961,7 +961,7 @@ Secret category for TTL (default: 'other')
 
 > `optional` **metadata**: `Record`\<`string`, `unknown`\>
 
-Defined in: [types.ts:285](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L285)
+Defined in: [types.ts:285](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L285)
 
 Additional metadata for audit logging
 
@@ -971,7 +971,7 @@ Additional metadata for audit logging
 
 > `optional` **required**: `boolean`
 
-Defined in: [types.ts:279](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L279)
+Defined in: [types.ts:279](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L279)
 
 Throw error if secret not found (default: true)
 
@@ -981,7 +981,7 @@ Throw error if secret not found (default: true)
 
 > `optional` **skipCache**: `boolean`
 
-Defined in: [types.ts:282](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L282)
+Defined in: [types.ts:282](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L282)
 
 Skip cache and always fetch fresh (default: false)
 
@@ -991,7 +991,7 @@ Skip cache and always fetch fresh (default: false)
 
 > `optional` **ttl**: `number`
 
-Defined in: [types.ts:276](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L276)
+Defined in: [types.ts:276](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L276)
 
 Custom TTL in seconds (overrides category default)
 
@@ -1001,7 +1001,7 @@ Custom TTL in seconds (overrides category default)
 
 > `optional` **vault**: `string`
 
-Defined in: [types.ts:270](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L270)
+Defined in: [types.ts:270](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L270)
 
 Vault name (default: 'default')
 
@@ -1014,7 +1014,7 @@ Vault name (default: 'default')
 
 # Interface: CacheEntry
 
-Defined in: [types.ts:114](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L114)
+Defined in: [types.ts:114](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L114)
 
 Cache entry with TTL and access tracking
 
@@ -1024,7 +1024,7 @@ Cache entry with TTL and access tracking
 
 > **accessCount**: `number`
 
-Defined in: [types.ts:125](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L125)
+Defined in: [types.ts:125](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L125)
 
 Number of times accessed
 
@@ -1034,7 +1034,7 @@ Number of times accessed
 
 > **category**: [`SecretCategory`](../type-aliases/SecretCategory.md)
 
-Defined in: [types.ts:128](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L128)
+Defined in: [types.ts:128](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L128)
 
 Secret category for TTL management
 
@@ -1044,7 +1044,7 @@ Secret category for TTL management
 
 > **expiresAt**: `number`
 
-Defined in: [types.ts:119](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L119)
+Defined in: [types.ts:119](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L119)
 
 Timestamp when entry expires (ms since epoch)
 
@@ -1054,7 +1054,7 @@ Timestamp when entry expires (ms since epoch)
 
 > **lastAccessed**: `number`
 
-Defined in: [types.ts:122](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L122)
+Defined in: [types.ts:122](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L122)
 
 Timestamp of last access (ms since epoch)
 
@@ -1064,7 +1064,7 @@ Timestamp of last access (ms since epoch)
 
 > **value**: [`EncryptedData`](EncryptedData.md)
 
-Defined in: [types.ts:116](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L116)
+Defined in: [types.ts:116](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L116)
 
 Encrypted secret value (AES-256-GCM)
 
@@ -1077,7 +1077,7 @@ Encrypted secret value (AES-256-GCM)
 
 # Interface: CacheStats
 
-Defined in: [types.ts:134](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L134)
+Defined in: [types.ts:134](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L134)
 
 Cache statistics for monitoring
 
@@ -1087,7 +1087,7 @@ Cache statistics for monitoring
 
 > **entries**: `number`
 
-Defined in: [types.ts:142](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L142)
+Defined in: [types.ts:142](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L142)
 
 Current number of cached entries
 
@@ -1097,7 +1097,7 @@ Current number of cached entries
 
 > **evictions**: `number`
 
-Defined in: [types.ts:151](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L151)
+Defined in: [types.ts:151](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L151)
 
 Number of entries evicted due to size limit
 
@@ -1107,7 +1107,7 @@ Number of entries evicted due to size limit
 
 > **expirations**: `number`
 
-Defined in: [types.ts:154](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L154)
+Defined in: [types.ts:154](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L154)
 
 Number of entries expired due to TTL
 
@@ -1117,7 +1117,7 @@ Number of entries expired due to TTL
 
 > **hitRate**: `number`
 
-Defined in: [types.ts:157](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L157)
+Defined in: [types.ts:157](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L157)
 
 Cache hit rate (0-1)
 
@@ -1127,7 +1127,7 @@ Cache hit rate (0-1)
 
 > **hits**: `number`
 
-Defined in: [types.ts:136](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L136)
+Defined in: [types.ts:136](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L136)
 
 Total number of cache hits
 
@@ -1137,7 +1137,7 @@ Total number of cache hits
 
 > **maxSize**: `number`
 
-Defined in: [types.ts:148](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L148)
+Defined in: [types.ts:148](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L148)
 
 Maximum cache size
 
@@ -1147,7 +1147,7 @@ Maximum cache size
 
 > **misses**: `number`
 
-Defined in: [types.ts:139](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L139)
+Defined in: [types.ts:139](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L139)
 
 Total number of cache misses
 
@@ -1157,7 +1157,7 @@ Total number of cache misses
 
 > `optional` **newestEntry**: `number`
 
-Defined in: [types.ts:163](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L163)
+Defined in: [types.ts:163](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L163)
 
 Newest entry expiration time (ms since epoch)
 
@@ -1167,7 +1167,7 @@ Newest entry expiration time (ms since epoch)
 
 > `optional` **oldestEntry**: `number`
 
-Defined in: [types.ts:160](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L160)
+Defined in: [types.ts:160](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L160)
 
 Oldest entry expiration time (ms since epoch)
 
@@ -1177,7 +1177,7 @@ Oldest entry expiration time (ms since epoch)
 
 > **size**: `number`
 
-Defined in: [types.ts:145](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L145)
+Defined in: [types.ts:145](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L145)
 
 Current number of cached entries
 
@@ -1187,7 +1187,7 @@ Current number of cached entries
 
 > **vaults**: `string`[]
 
-Defined in: [types.ts:166](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L166)
+Defined in: [types.ts:166](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L166)
 
 List of vault IDs in cache
 
@@ -1200,7 +1200,7 @@ List of vault IDs in cache
 
 # Interface: VaultConfigFile
 
-Defined in: [types.ts:198](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L198)
+Defined in: [types.ts:198](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L198)
 
 Full vault configuration file structure
 
@@ -1212,7 +1212,7 @@ Located at: ~/.config/vaultwarden-secrets/config.json
 
 > `optional` **aliases**: `Record`\<`string`, `string`\>
 
-Defined in: [types.ts:209](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L209)
+Defined in: [types.ts:209](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L209)
 
 Secret aliases for cross-project references (alias → target)
 
@@ -1222,7 +1222,7 @@ Secret aliases for cross-project references (alias → target)
 
 > `optional` **defaultFolder**: `string`
 
-Defined in: [types.ts:206](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L206)
+Defined in: [types.ts:206](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L206)
 
 Default folder prefix for secrets (e.g., "Projects/myapp")
 
@@ -1232,7 +1232,7 @@ Default folder prefix for secrets (e.g., "Projects/myapp")
 
 > `optional` **defaultVault**: `string`
 
-Defined in: [types.ts:203](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L203)
+Defined in: [types.ts:203](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L203)
 
 Default vault name (if not specified in config entries)
 
@@ -1242,7 +1242,7 @@ Default vault name (if not specified in config entries)
 
 > `optional` **inherits**: `Record`\<`string`, `string`\>
 
-Defined in: [types.ts:212](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L212)
+Defined in: [types.ts:212](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L212)
 
 Inheritance - project inherits secrets from another (project → parent)
 
@@ -1252,7 +1252,7 @@ Inheritance - project inherits secrets from another (project → parent)
 
 > **vaults**: `Record`\<`string`, [`VaultConfig`](VaultConfig.md)\>
 
-Defined in: [types.ts:200](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L200)
+Defined in: [types.ts:200](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L200)
 
 Map of vault name to vault config
 
@@ -1262,7 +1262,7 @@ Map of vault name to vault config
 
 > **version**: `string`
 
-Defined in: [types.ts:215](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L215)
+Defined in: [types.ts:215](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L215)
 
 Configuration version for migrations
 
@@ -1275,7 +1275,7 @@ Configuration version for migrations
 
 # Interface: EncryptedData
 
-Defined in: [types.ts:96](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L96)
+Defined in: [types.ts:96](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L96)
 
 AES-256-GCM encrypted data structure
 
@@ -1295,7 +1295,7 @@ AES-256-GCM encrypted data structure
 
 > **authTag**: `string`
 
-Defined in: [types.ts:101](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L101)
+Defined in: [types.ts:101](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L101)
 
 Authentication tag for GCM mode (base64)
 
@@ -1305,7 +1305,7 @@ Authentication tag for GCM mode (base64)
 
 > **encryptedData**: `string`
 
-Defined in: [types.ts:104](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L104)
+Defined in: [types.ts:104](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L104)
 
 Encrypted payload (base64)
 
@@ -1315,7 +1315,7 @@ Encrypted payload (base64)
 
 > **iv**: `string`
 
-Defined in: [types.ts:98](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L98)
+Defined in: [types.ts:98](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L98)
 
 Initialization vector (base64)
 
@@ -1328,7 +1328,7 @@ Initialization vector (base64)
 
 # Interface: VaultConfig
 
-Defined in: [types.ts:176](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L176)
+Defined in: [types.ts:176](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L176)
 
 Vault configuration for a single vault
 
@@ -1338,7 +1338,7 @@ Vault configuration for a single vault
 
 > `optional` **default**: `boolean`
 
-Defined in: [types.ts:190](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L190)
+Defined in: [types.ts:190](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L190)
 
 Whether this is the default vault
 
@@ -1348,7 +1348,7 @@ Whether this is the default vault
 
 > `optional` **description**: `string`
 
-Defined in: [types.ts:187](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L187)
+Defined in: [types.ts:187](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L187)
 
 Description of vault purpose
 
@@ -1358,7 +1358,7 @@ Description of vault purpose
 
 > **keychainItem**: `string`
 
-Defined in: [types.ts:184](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L184)
+Defined in: [types.ts:184](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L184)
 
 Keychain item name for vault master password
 
@@ -1368,7 +1368,7 @@ Keychain item name for vault master password
 
 > **name**: `string`
 
-Defined in: [types.ts:178](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L178)
+Defined in: [types.ts:178](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L178)
 
 Vault name (e.g., 'default', 'work')
 
@@ -1378,7 +1378,7 @@ Vault name (e.g., 'default', 'work')
 
 > **path**: `string`
 
-Defined in: [types.ts:181](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L181)
+Defined in: [types.ts:181](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L181)
 
 Absolute path to vault file
 
@@ -1393,7 +1393,7 @@ Absolute path to vault file
 
 > **listVaults**(): `Promise`\<[`VaultConfig`](../interfaces/VaultConfig.md)[]\>
 
-Defined in: [index.ts:513](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L513)
+Defined in: [index.ts:513](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L513)
 
 List all configured vaults
 
@@ -1423,7 +1423,7 @@ for (const vault of vaults) {
 
 > **setSession**(`vaultId`, `token`): `Promise`\<`void`\>
 
-Defined in: [index.ts:482](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L482)
+Defined in: [index.ts:482](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L482)
 
 Store a session token for a vault (after bw unlock)
 
@@ -2334,7 +2334,7 @@ if (match) {
 
 > **getCacheStats**(): [`CacheStats`](../interfaces/CacheStats.md)
 
-Defined in: [index.ts:436](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L436)
+Defined in: [index.ts:436](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L436)
 
 Get cache statistics
 
@@ -2364,7 +2364,7 @@ console.log(`Active vaults: ${stats.vaults.join(', ')}`);
 
 > **getSecret**(`path`, `options`): `Promise`\<`string`\>
 
-Defined in: [index.ts:146](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L146)
+Defined in: [index.ts:146](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L146)
 
 Get a secret from Vaultwarden with caching
 
@@ -2422,7 +2422,7 @@ const workSecret = await getSecret('work-token', { vault: 'work' });
 
 > **listSecrets**(`filter?`, `options?`): `Promise`\<`string`[]\>
 
-Defined in: [index.ts:360](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L360)
+Defined in: [index.ts:360](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L360)
 
 List available secrets (items) from Vaultwarden
 
@@ -2474,7 +2474,7 @@ const workSecrets = await listSecrets(undefined, { vault: 'work' });
 
 > **switchVault**(`vaultId`): `Promise`\<`void`\>
 
-Defined in: [index.ts:450](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L450)
+Defined in: [index.ts:450](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L450)
 
 Switch active vault
 
@@ -2512,7 +2512,7 @@ await switchVault('work');
 
 > **clearCache**(`vaultId?`): `Promise`\<`void`\>
 
-Defined in: [index.ts:421](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L421)
+Defined in: [index.ts:421](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L421)
 
 Clear the encrypted cache
 
@@ -2549,7 +2549,7 @@ await clearCache('work');
 
 > **getFolder**(): `Promise`\<`string`\>
 
-Defined in: [index.ts:526](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L526)
+Defined in: [index.ts:526](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L526)
 
 Get default folder prefix
 
@@ -2577,7 +2577,7 @@ console.log(`Current folder: ${folder || '(none)'}`);
 
 > **setFolder**(`folder`): `Promise`\<`void`\>
 
-Defined in: [index.ts:542](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L542)
+Defined in: [index.ts:542](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L542)
 
 Set default folder prefix
 
@@ -2614,7 +2614,7 @@ await getSecret('postgres'); // looks up "Projects/myapp/postgres"
 
 > **getActiveVault**(): `Promise`\<`string`\>
 
-Defined in: [index.ts:465](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L465)
+Defined in: [index.ts:465](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L465)
 
 Get active vault ID
 
@@ -2642,7 +2642,7 @@ console.log(`Using vault: ${activeVault}`);
 
 > **getSecretObject**(`itemName`, `options`): `Promise`\<`Record`\<`string`, `string`\>\>
 
-Defined in: [index.ts:271](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L271)
+Defined in: [index.ts:271](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L271)
 
 Get all fields from a Vaultwarden item as an object
 
@@ -2690,7 +2690,7 @@ const workSecrets = await getSecretObject('work-token', { vault: 'work' });
 
 > **clearFolder**(): `Promise`\<`void`\>
 
-Defined in: [index.ts:555](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/index.ts#L555)
+Defined in: [index.ts:555](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L555)
 
 Clear default folder prefix
 
@@ -2718,7 +2718,7 @@ await getSecret('postgres'); // looks up "postgres" directly
 
 > `const` **vaultManager**: `VaultManager`
 
-Defined in: [vault-config.ts:272](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/vault-config.ts#L272)
+Defined in: [vault-config.ts:272](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/vault-config.ts#L272)
 
 
 [**vaultwarden-secrets**](../README.md)
@@ -2731,7 +2731,7 @@ Defined in: [vault-config.ts:272](https://github.com/rodaddy/vaultwarden-secrets
 
 > `const` **DEFAULT\_TTLS**: `Record`\<[`SecretCategory`](../type-aliases/SecretCategory.md), `number`\>
 
-Defined in: [types.ts:295](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L295)
+Defined in: [types.ts:295](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L295)
 
 Default TTLs by secret category (in seconds)
 
@@ -2746,7 +2746,7 @@ Default TTLs by secret category (in seconds)
 
 > `const` **secretCache**: `SecretCache`
 
-Defined in: [cache.ts:395](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/cache.ts#L395)
+Defined in: [cache.ts:395](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/cache.ts#L395)
 
 Singleton cache instance
 
@@ -2771,7 +2771,7 @@ const token = await secretCache.get('github-pat.token', 'default');
 
 > `const` **Constants**: `object`
 
-Defined in: [types.ts:361](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L361)
+Defined in: [types.ts:361](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L361)
 
 System constants for secrets management
 
@@ -2884,7 +2884,7 @@ Default vaults directory
 
 > **SecretCategory** = `"api_key"` \| `"password"` \| `"token"` \| `"certificate"` \| `"database"` \| `"other"`
 
-Defined in: [types.ts:74](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L74)
+Defined in: [types.ts:74](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L74)
 
 Categories of secrets for TTL and access patterns
 
@@ -2897,7 +2897,7 @@ Categories of secrets for TTL and access patterns
 
 # Class: SecretError
 
-Defined in: [types.ts:55](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L55)
+Defined in: [types.ts:55](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L55)
 
 Custom error class for secret operations
 
@@ -2921,7 +2921,7 @@ throw new SecretError(
 
 > **new SecretError**(`message`, `code`, `retryable`, `cause?`): `SecretError`
 
-Defined in: [types.ts:56](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L56)
+Defined in: [types.ts:56](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L56)
 
 #### Parameters
 
@@ -2955,7 +2955,7 @@ Defined in: [types.ts:56](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > `readonly` `optional` **cause**: `Error`
 
-Defined in: [types.ts:60](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L60)
+Defined in: [types.ts:60](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L60)
 
 #### Inherited from
 
@@ -2967,7 +2967,7 @@ Defined in: [types.ts:60](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > `readonly` **code**: [`ErrorCode`](../enumerations/ErrorCode.md)
 
-Defined in: [types.ts:58](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L58)
+Defined in: [types.ts:58](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L58)
 
 ***
 
@@ -2999,7 +2999,7 @@ Defined in: node\_modules/typescript/lib/lib.es5.d.ts:1076
 
 > `readonly` **retryable**: `boolean` = `false`
 
-Defined in: [types.ts:59](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L59)
+Defined in: [types.ts:59](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L59)
 
 ***
 
@@ -3224,7 +3224,7 @@ https://v8.dev/docs/stack-trace-api#customizing-stack-traces
 
 # Enumeration: ErrorCode
 
-Defined in: [types.ts:17](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L17)
+Defined in: [types.ts:17](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L17)
 
 Error codes for secret operations
 
@@ -3234,7 +3234,7 @@ Error codes for secret operations
 
 > **CACHE\_ERROR**: `"CACHE_ERROR"`
 
-Defined in: [types.ts:41](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L41)
+Defined in: [types.ts:41](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L41)
 
 ***
 
@@ -3242,7 +3242,7 @@ Defined in: [types.ts:41](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **DECRYPTION\_FAILED**: `"DECRYPTION_FAILED"`
 
-Defined in: [types.ts:31](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L31)
+Defined in: [types.ts:31](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L31)
 
 ***
 
@@ -3250,7 +3250,7 @@ Defined in: [types.ts:31](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **ENCRYPTION\_FAILED**: `"ENCRYPTION_FAILED"`
 
-Defined in: [types.ts:30](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L30)
+Defined in: [types.ts:30](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L30)
 
 ***
 
@@ -3258,7 +3258,7 @@ Defined in: [types.ts:30](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **FILE\_SYSTEM\_ERROR**: `"FILE_SYSTEM_ERROR"`
 
-Defined in: [types.ts:42](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L42)
+Defined in: [types.ts:42](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L42)
 
 ***
 
@@ -3266,7 +3266,7 @@ Defined in: [types.ts:42](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **INVALID\_CATEGORY**: `"INVALID_CATEGORY"`
 
-Defined in: [types.ts:36](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L36)
+Defined in: [types.ts:36](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L36)
 
 ***
 
@@ -3274,7 +3274,7 @@ Defined in: [types.ts:36](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **INVALID\_KEY**: `"INVALID_KEY"`
 
-Defined in: [types.ts:32](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L32)
+Defined in: [types.ts:32](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L32)
 
 ***
 
@@ -3282,7 +3282,7 @@ Defined in: [types.ts:32](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **INVALID\_PATH**: `"INVALID_PATH"`
 
-Defined in: [types.ts:35](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L35)
+Defined in: [types.ts:35](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L35)
 
 ***
 
@@ -3290,7 +3290,7 @@ Defined in: [types.ts:35](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **KEYCHAIN\_ACCESS\_DENIED**: `"KEYCHAIN_ACCESS_DENIED"`
 
-Defined in: [types.ts:20](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L20)
+Defined in: [types.ts:20](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L20)
 
 ***
 
@@ -3298,7 +3298,7 @@ Defined in: [types.ts:20](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **KEYCHAIN\_COMMAND\_FAILED**: `"KEYCHAIN_COMMAND_FAILED"`
 
-Defined in: [types.ts:21](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L21)
+Defined in: [types.ts:21](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L21)
 
 ***
 
@@ -3306,7 +3306,7 @@ Defined in: [types.ts:21](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **KEYCHAIN\_NOT\_FOUND**: `"KEYCHAIN_NOT_FOUND"`
 
-Defined in: [types.ts:19](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L19)
+Defined in: [types.ts:19](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L19)
 
 ***
 
@@ -3314,7 +3314,7 @@ Defined in: [types.ts:19](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **SECRET\_NOT\_FOUND**: `"SECRET_NOT_FOUND"`
 
-Defined in: [types.ts:37](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L37)
+Defined in: [types.ts:37](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L37)
 
 ***
 
@@ -3322,7 +3322,7 @@ Defined in: [types.ts:37](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **UNKNOWN\_ERROR**: `"UNKNOWN_ERROR"`
 
-Defined in: [types.ts:40](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L40)
+Defined in: [types.ts:40](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L40)
 
 ***
 
@@ -3330,7 +3330,7 @@ Defined in: [types.ts:40](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **VAULT\_CORRUPTED**: `"VAULT_CORRUPTED"`
 
-Defined in: [types.ts:26](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L26)
+Defined in: [types.ts:26](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L26)
 
 ***
 
@@ -3338,7 +3338,7 @@ Defined in: [types.ts:26](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **VAULT\_INVALID\_FORMAT**: `"VAULT_INVALID_FORMAT"`
 
-Defined in: [types.ts:27](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L27)
+Defined in: [types.ts:27](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L27)
 
 ***
 
@@ -3346,7 +3346,7 @@ Defined in: [types.ts:27](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **VAULT\_LOCKED**: `"VAULT_LOCKED"`
 
-Defined in: [types.ts:25](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L25)
+Defined in: [types.ts:25](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L25)
 
 ***
 
@@ -3354,7 +3354,7 @@ Defined in: [types.ts:25](https://github.com/rodaddy/vaultwarden-secrets/blob/70
 
 > **VAULT\_NOT\_FOUND**: `"VAULT_NOT_FOUND"`
 
-Defined in: [types.ts:24](https://github.com/rodaddy/vaultwarden-secrets/blob/7040cba5c9389ed6bbec07262cb9c5a95b21dd1d/types.ts#L24)
+Defined in: [types.ts:24](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L24)
 <!-- API END -->
 
 ## Testing
