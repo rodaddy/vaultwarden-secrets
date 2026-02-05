@@ -28,7 +28,7 @@ interface ExtendedParsedPath {
 }
 
 /**
- * Apply folder prefix to path if needed
+ * Apply folder prefix to path if needed (TEST CHANGE)
  *
  * Rule: If path contains '/', use as-is (explicit folder).
  * Otherwise, prepend the default folder.

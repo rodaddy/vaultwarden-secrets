@@ -865,6 +865,11 @@ async function showCacheMetrics() {
 }
 ```
 
+## API Reference
+<!-- API START -->
+
+<!-- API END -->
+
 ## Testing
 
 Run the test suite:
