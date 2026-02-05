@@ -7,12 +7,51 @@ import * as readline from 'readline';
 import { MigrationPlan, PlannedSecret, SecretAlias } from './types';
 import { vaultManager } from '../vault-config';
 import { getVaultSession } from '../keychain';
+import { recordMigration } from './manifest';
 
 // Colors
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+/**
+ * Find existing VW item with matching value
+ * Returns: { found: false } | { found: true, match: 'exact'|'conflict', itemName: string }
+ */
+async function findExistingSecret(
+  value: string,
+  session: string
+): Promise<{ found: false } | { found: true; match: 'exact' | 'conflict'; itemName: string; existingValue?: string }> {
+  try {
+    // Get all items and search for matching password
+    const result = await $`BW_SESSION=${session} bw list items`.quiet();
+    const items = JSON.parse(result.stdout.toString());
+
+    for (const item of items) {
+      // Check password field
+      if (item.login?.password === value) {
+        return { found: true, match: 'exact', itemName: item.name };
+      }
+      // Check notes field (some secrets stored there)
+      if (item.notes === value) {
+        return { found: true, match: 'exact', itemName: item.name };
+      }
+      // Check custom fields
+      if (item.fields) {
+        for (const field of item.fields) {
+          if (field.value === value) {
+            return { found: true, match: 'exact', itemName: `${item.name}.fields.${field.name}` };
+          }
+        }
+      }
+    }
+
+    return { found: false };
+  } catch {
+    return { found: false };
+  }
+}
 
 /**
  * Create a single secret in VW
@@ -134,6 +173,8 @@ export async function executePlan(
   // Create each secret
   console.log('\nCreating secrets...\n');
 
+  const aliasesToCreate: SecretAlias[] = [];
+
   for (const secret of plan.secretsToCreate) {
     const itemName = `${secret.folder}/${secret.itemName}`;
     process.stdout.write(`  ${itemName}... `);
@@ -141,6 +182,21 @@ export async function executePlan(
     if (options.dryRun) {
       console.log(dim('[dry run]'));
       results.created++;
+      continue;
+    }
+
+    // Check if this value already exists in VW
+    const existing = await findExistingSecret(secret.value, session);
+
+    if (existing.found && existing.match === 'exact') {
+      // Same value exists - create alias instead
+      console.log(yellow('→ alias') + dim(` (exists as "${existing.itemName}")`));
+      aliasesToCreate.push({
+        alias: secret.itemName,
+        target: existing.itemName,
+        reason: 'Value already exists in VW',
+      });
+      results.skipped++;
       continue;
     }
 
@@ -159,23 +215,61 @@ export async function executePlan(
     }
   }
 
-  // Save aliases
-  if (plan.aliases.length > 0 && !options.dryRun) {
+  // Save aliases (both planned and dynamically created for duplicates)
+  const allAliases = [...plan.aliases, ...aliasesToCreate];
+  if (allAliases.length > 0 && !options.dryRun) {
     console.log(dim('\nSaving aliases to config...'));
-    await saveAliases(plan.aliases);
-    console.log(green('✓') + ` Saved ${plan.aliases.length} alias(es)`);
+    await saveAliases(allAliases);
+    console.log(green('✓') + ` Saved ${allAliases.length} alias(es)`);
+    if (aliasesToCreate.length > 0) {
+      console.log(dim(`  (${aliasesToCreate.length} auto-created for existing values)`));
+    }
   }
 
   // Summary
   console.log('\n' + '─'.repeat(40));
   console.log(`Created: ${green(String(results.created))}`);
-  if (results.skipped > 0) {
-    console.log(`Skipped (already exist): ${yellow(String(results.skipped))}`);
+  if (aliasesToCreate.length > 0) {
+    console.log(`Aliased (value exists): ${yellow(String(aliasesToCreate.length))}`);
+  }
+  if (results.skipped - aliasesToCreate.length > 0) {
+    console.log(`Skipped (name exists): ${yellow(String(results.skipped - aliasesToCreate.length))}`);
   }
   if (results.failed > 0) {
     console.log(`Failed: ${red(String(results.failed))}`);
     for (const err of results.errors) {
       console.log(`  ${red('•')} ${err.item}: ${err.error}`);
+    }
+  }
+
+  // Record migration to manifest (group by source file)
+  if (!options.dryRun && (results.created > 0 || aliasesToCreate.length > 0)) {
+    const bySource = new Map<string, { created: string[]; aliased: Record<string, string> }>();
+
+    // Track created items
+    for (const secret of plan.secretsToCreate) {
+      const itemName = `${secret.folder}/${secret.itemName}`;
+      for (const src of secret.sources) {
+        const existing = bySource.get(src.path) || { created: [], aliased: {} };
+        existing.created.push(itemName);
+        bySource.set(src.path, existing);
+      }
+    }
+
+    // Track aliases
+    for (const alias of aliasesToCreate) {
+      // Find which source this alias came from
+      const secret = plan.secretsToCreate.find(s => s.itemName === alias.alias);
+      if (secret?.sources?.[0]?.path) {
+        const existing = bySource.get(secret.sources[0].path) || { created: [], aliased: {} };
+        existing.aliased[alias.alias] = alias.target;
+        bySource.set(secret.sources[0].path, existing);
+      }
+    }
+
+    // Save to manifest
+    for (const [sourcePath, record] of bySource) {
+      recordMigration(sourcePath, record);
     }
   }
 

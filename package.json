@@ -1,6 +1,6 @@
 {
   "name": "vaultwarden-secrets",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Secure secrets management library with Vaultwarden/Bitwarden CLI integration, macOS Keychain storage, and encrypted caching",
   "author": "Rico",
   "license": "MIT",
@@ -31,15 +31,24 @@
     "typecheck": "bun x tsc --noEmit",
     "example": "bun run example.ts",
     "secret": "bun run bin/secret",
+    "server": "bun run server/main.ts",
+    "server:dev": "SECURITY_PROFILE=feeling-lucky bun run server/main.ts",
+    "server:prod": "SECURITY_PROFILE=im-aware bun run server/main.ts",
     "install-config": "./install.sh",
     "install-pai": "./install.sh --pai",
     "uninstall": "./install.sh --uninstall",
     "set-session": "bun run cli.ts set-session",
     "get": "bun run cli.ts get"
   },
+  "dependencies": {
+    "hono": "^4.11.7",
+    "jose": "^6.1.3"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^20.0.0",
+    "typedoc": "^0.28.16",
+    "typedoc-plugin-markdown": "^4.9.0",
     "typescript": "^5.0.0"
   },
   "engines": {

@@ -60,7 +60,7 @@ function applyFolder(path: string, folder: string): string {
 }
 
 /**
- * Parse secret path like "Item.field" or "Item.fields.CUSTOM"
+ * Parse secret path with support for standard and custom fields
  *
  * @param path - Secret path to parse
  * @returns Parsed path components
@@ -71,24 +71,50 @@ function applyFolder(path: string, folder: string): string {
  * parseSecretPath('github-pat.fields.API_KEY') // { item: 'github-pat', customField: 'API_KEY' }
  */
 function parseSecretPath(path: string): ExtendedParsedPath {
-  const parts = path.split('.');
-  const item = parts[0];
-
-  if (parts.length === 1) {
-    return { item };
-  }
-
-  // Handle custom fields: Item.fields.CUSTOM_FIELD_NAME
-  if (parts[1] === 'fields' && parts.length >= 3) {
+  // Handle known field path patterns that can appear anywhere in the path
+  // Pattern: something.fields.FIELD_NAME - look for .fields. as the delimiter
+  const fieldsMatch = path.match(/^(.+)\.fields\.(.+)$/);
+  if (fieldsMatch) {
     return {
-      item,
-      customField: parts.slice(2).join('.') // Handle nested field names
+      item: fieldsMatch[1],
+      customField: fieldsMatch[2]
     };
   }
 
-  // Handle regular fields: Item.field or Item.login.password
+  // Pattern: something.login.xxx or something.notes (known BW fields)
+  // Look for known field names at the end
+  const knownFields = ['.login.password', '.login.username', '.login.totp', '.notes', '.uri'];
+  for (const fieldSuffix of knownFields) {
+    if (path.endsWith(fieldSuffix)) {
+      return {
+        item: path.slice(0, -fieldSuffix.length),
+        field: fieldSuffix.slice(1) // remove leading dot
+      };
+    }
+  }
+
+  // Simple case: single segment or segment.field where segment has no dots
+  const parts = path.split('.');
+  if (parts.length === 1) {
+    return { item: path };
+  }
+
+  // For ambiguous cases, assume everything except last part is item name
+  // This handles "some.item.name.password" → item="some.item.name", field="password"
+  // But also "simple-item.password" → item="simple-item", field="password"
+  const lastPart = parts[parts.length - 1];
+  const knownSimpleFields = ['password', 'username', 'uri', 'totp', 'notes'];
+
+  if (knownSimpleFields.includes(lastPart)) {
+    return {
+      item: parts.slice(0, -1).join('.'),
+      field: lastPart
+    };
+  }
+
+  // Default: first part is item, rest is field path
   return {
-    item,
+    item: parts[0],
     field: parts.slice(1).join('.')
   };
 }
@@ -121,9 +147,12 @@ export async function getSecret(
   path: string,
   options: SecretOptions = {}
 ): Promise<string> {
+  // Resolve alias first (e.g., OPENAI_API_KEY → "OpenAI API Key")
+  const aliasedPath = await vaultManager.resolveAlias(path);
+
   // Apply folder prefix if path doesn't have explicit folder
   const folder = await vaultManager.getFolder();
-  const resolvedPath = applyFolder(path, folder);
+  const resolvedPath = applyFolder(aliasedPath, folder);
   const parsed = parseSecretPath(resolvedPath);
   const vaultId = options.vault || await vaultManager.getActiveVault();
 
@@ -178,14 +207,20 @@ export async function getSecret(
 
       value = typeof current === 'string' ? current : JSON.stringify(current);
     } else {
-      // Return password by default
-      if (!item.login?.password) {
+      // Smart fallback: try password → notes → first custom field
+      if (item.login?.password) {
+        value = item.login.password;
+      } else if (item.notes) {
+        value = item.notes;
+      } else if (item.fields?.length > 0) {
+        // Try first custom field
+        value = item.fields[0].value;
+      } else {
         throw new SecretError(
-          `No password field in item: ${parsed.item}`,
+          `No value found in item: ${parsed.item} (no password, notes, or custom fields)`,
           ErrorCode.SECRET_NOT_FOUND
         );
       }
-      value = item.login.password;
     }
 
     // Cache the result
@@ -237,9 +272,12 @@ export async function getSecretObject(
   itemName: string,
   options: SecretOptions = {}
 ): Promise<Record<string, string>> {
+  // Resolve alias first
+  const aliasedItem = await vaultManager.resolveAlias(itemName);
+
   // Apply folder prefix if item doesn't have explicit folder
   const folder = await vaultManager.getFolder();
-  const resolvedItem = itemName.includes('/') ? itemName : (folder ? `${folder}/${itemName}` : itemName);
+  const resolvedItem = aliasedItem.includes('/') ? aliasedItem : (folder ? `${folder}/${aliasedItem}` : aliasedItem);
 
   const vaultId = options.vault || await vaultManager.getActiveVault();
   const session = await getVaultSession(vaultId);
@@ -516,21 +554,6 @@ export async function setFolder(folder: string): Promise<void> {
  */
 export async function clearFolder(): Promise<void> {
   await vaultManager.clearFolder();
-}
-
-/**
- * List all configured vaults
- *
- * @returns Promise resolving to array of vault configurations
- *
- * @example
- * const vaults = await listVaults();
- * for (const vault of vaults) {
- *   console.log(`${vault.name}: ${vault.description}`);
- * }
- */
-export async function listVaults() {
-  return vaultManager.listVaults();
 }
 
 // Re-export types and values for consumers
