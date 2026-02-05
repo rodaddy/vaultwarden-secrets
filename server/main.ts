@@ -46,6 +46,15 @@ if (profile.ipWhitelist === false) {
   app.use('*', cors({ origin: allowedOrigins }));
 }
 
+// Health check endpoint (always public, no auth required)
+app.get('/health', (c) => {
+  return c.json({
+    status: 'ok',
+    profile: profile.name,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // Apply middleware based on profile
 console.log('Active security layers:');
 
@@ -123,15 +132,6 @@ app.use('*', auditLogger(profile.audit, auditLogFile));
 console.log(`  ✓ Audit Logging: ${profile.audit}${auditLogFile ? ` → ${auditLogFile}` : ' (console only)'}`);
 
 console.log('');
-
-// Health check endpoint
-app.get('/health', (c) => {
-  return c.json({
-    status: 'ok',
-    profile: profile.name,
-    timestamp: new Date().toISOString(),
-  });
-});
 
 // List vaults
 app.get('/vaults', async (c: Context) => {

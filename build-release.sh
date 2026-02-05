@@ -35,6 +35,24 @@ cp -r migrate/*.ts "$RELEASE_DIR/migrate/"
 mkdir -p "$RELEASE_DIR/shell"
 cp -r shell/*.sh "$RELEASE_DIR/shell/" 2>/dev/null || true
 
+# Server (HTTP API)
+if [ -d "server" ]; then
+    echo "→ Copying server files..."
+    mkdir -p "$RELEASE_DIR/server"
+    cp -r server/*.ts "$RELEASE_DIR/server/"
+    cp -r server/auth "$RELEASE_DIR/server/" 2>/dev/null || true
+    cp -r server/middleware "$RELEASE_DIR/server/" 2>/dev/null || true
+    cp -r server/utils "$RELEASE_DIR/server/" 2>/dev/null || true
+    cp server/README.md "$RELEASE_DIR/server/" 2>/dev/null || true
+fi
+
+# Deployment templates
+if [ -d "deploy" ]; then
+    echo "→ Copying deployment templates..."
+    mkdir -p "$RELEASE_DIR/deploy"
+    cp -r deploy/* "$RELEASE_DIR/deploy/"
+fi
+
 # Installer
 cp install.sh "$RELEASE_DIR/"
 chmod +x "$RELEASE_DIR/install.sh"
@@ -45,6 +63,7 @@ cat > "$RELEASE_DIR/.release-config" << 'EOF'
 # Release Configuration Hints
 # Copy this to .env or set as environment variables
 
+# CLI Configuration:
 # Required: Your Vaultwarden server URL
 # VAULTWARDEN_SERVER=https://vault.example.com
 
@@ -53,6 +72,14 @@ cat > "$RELEASE_DIR/.release-config" << 'EOF'
 
 # Optional: Git repository (for updates)
 # VW_SECRETS_REPO=https://github.com/yourusername/vaultwarden-secrets.git
+
+# Server Configuration:
+# See deploy/env.example for HTTP server environment variables
+# See deploy/DEPLOY.md for full deployment guide
+# Deployment templates available in deploy/ directory:
+#   - deploy/systemd/vaultwarden-secrets.service
+#   - deploy/nginx/secrets.conf
+#   - deploy/env.example
 EOF
 
 echo "→ Creating tarball..."
