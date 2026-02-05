@@ -56,11 +56,12 @@ function extractProxyFingerprint(c: Context, headerName: string): string | null 
     return null;
   }
 
-  // Normalize format: accept both "sha256:abc..." and "abc..."
-  if (fingerprint.startsWith('sha256:')) {
-    return fingerprint;
+  // Normalize format: accept both "sha256:abc..." and "abc...", and normalize case
+  const normalized = fingerprint.toLowerCase().trim();
+  if (normalized.startsWith('sha256:')) {
+    return normalized;
   }
-  return `sha256:${fingerprint}`;
+  return `sha256:${normalized}`;
 }
 
 /**

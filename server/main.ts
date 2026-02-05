@@ -189,6 +189,29 @@ app.get('/secret/:name', async (c: Context) => {
   }
 });
 
+// Return 405 for unsupported methods on valid paths
+const methodNotAllowed = (c: Context) => {
+  return c.json(
+    { error: 'Method not allowed', allowed: ['GET'] },
+    405
+  );
+};
+
+app.post('/health', methodNotAllowed);
+app.put('/health', methodNotAllowed);
+app.delete('/health', methodNotAllowed);
+app.patch('/health', methodNotAllowed);
+
+app.post('/vaults', methodNotAllowed);
+app.put('/vaults', methodNotAllowed);
+app.delete('/vaults', methodNotAllowed);
+app.patch('/vaults', methodNotAllowed);
+
+app.post('/secret/:name', methodNotAllowed);
+app.put('/secret/:name', methodNotAllowed);
+app.delete('/secret/:name', methodNotAllowed);
+app.patch('/secret/:name', methodNotAllowed);
+
 // Start server
 const port = parseInt(process.env.PORT || '3000', 10);
 const host = process.env.HOST || '0.0.0.0';

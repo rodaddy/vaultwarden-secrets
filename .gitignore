@@ -31,3 +31,4 @@ coverage/
 .reports/
 .server.log
 .server.pid
+deploy/tls/

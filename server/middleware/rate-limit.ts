@@ -111,11 +111,25 @@ export function rateLimit(config: RateLimitConfig) {
     // Add this request to history
     state.requests.push(now);
 
-    // Add rate limit headers
-    c.header('X-RateLimit-Limit', maxRequests.toString());
-    c.header('X-RateLimit-Remaining', (maxRequests - state.requests.length).toString());
-    c.header('X-RateLimit-Reset', new Date(now + windowMs).toISOString());
-
+    // Continue to route handler
     await next();
+
+    // Add rate limit headers to the response
+    // Must be done after next() to ensure headers are added to the actual response
+    const remaining = Math.max(0, maxRequests - state.requests.length);
+    const resetTime = new Date(now + windowMs).toISOString();
+
+    // Clone response with additional headers
+    const originalResponse = c.res;
+    const newHeaders = new Headers(originalResponse.headers);
+    newHeaders.set('X-RateLimit-Limit', maxRequests.toString());
+    newHeaders.set('X-RateLimit-Remaining', remaining.toString());
+    newHeaders.set('X-RateLimit-Reset', resetTime);
+
+    c.res = new Response(originalResponse.body, {
+      status: originalResponse.status,
+      statusText: originalResponse.statusText,
+      headers: newHeaders,
+    });
   };
 }
