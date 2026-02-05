@@ -25,3 +25,9 @@ coverage/
 # Cache (never commit secrets!)
 .vw-cache.json
 .bw_session*
+
+# Working files (implementation notes, session context)
+.working/
+.reports/
+.server.log
+.server.pid
