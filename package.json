@@ -31,11 +31,17 @@
     "typecheck": "bun x tsc --noEmit",
     "example": "bun run example.ts",
     "secret": "bun run bin/secret",
+    "server": "bun run server/main.ts",
+    "server:dev": "SECURITY_PROFILE=feeling-lucky bun run server/main.ts",
+    "server:prod": "SECURITY_PROFILE=im-aware bun run server/main.ts",
     "install-config": "./install.sh",
     "install-pai": "./install.sh --pai",
     "uninstall": "./install.sh --uninstall",
     "set-session": "bun run cli.ts set-session",
     "get": "bun run cli.ts get"
+  },
+  "dependencies": {
+    "hono": "^4.11.7"
   },
   "devDependencies": {
     "@types/bun": "latest",
