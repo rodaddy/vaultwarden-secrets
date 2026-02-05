@@ -225,4 +225,7 @@ export const DEFAULT_EXCLUDE_PATTERNS = [
   '*.backup',
   '*.bak',
   '*.migrated',
+  '*.example',      // Skip template files
+  '.env.example',
+  '.envrc.example',
 ] as const;

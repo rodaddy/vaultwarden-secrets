@@ -220,6 +220,52 @@ export class VaultManager {
     delete config.defaultFolder;
     await this.saveConfig();
   }
+
+  /**
+   * Resolve alias to actual secret path
+   *
+   * If the path is an alias, returns the aliased path.
+   * Handles field paths like "OPENAI_API_KEY.notes" by resolving the base name.
+   * Otherwise returns the original path unchanged.
+   *
+   * @param path - Secret path to resolve
+   * @returns Promise resolving to actual path (aliased or original)
+   */
+  async resolveAlias(path: string): Promise<string> {
+    const config = await this.loadConfig();
+    const aliases = (config as any).aliases as Record<string, string> | undefined;
+
+    if (!aliases) return path;
+
+    // Exact match
+    if (aliases[path]) {
+      return aliases[path];
+    }
+
+    // Check for field path (e.g., "OPENAI_API_KEY.notes")
+    const dotIndex = path.indexOf('.');
+    if (dotIndex > 0) {
+      const baseName = path.substring(0, dotIndex);
+      const fieldPath = path.substring(dotIndex); // includes the dot
+
+      if (aliases[baseName]) {
+        // Resolve base name and append field path
+        return aliases[baseName] + fieldPath;
+      }
+    }
+
+    return path;
+  }
+
+  /**
+   * Get all aliases
+   *
+   * @returns Promise resolving to alias map
+   */
+  async getAliases(): Promise<Record<string, string>> {
+    const config = await this.loadConfig();
+    return (config as any).aliases || {};
+  }
 }
 
 // Singleton instance
