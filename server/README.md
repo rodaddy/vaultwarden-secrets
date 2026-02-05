@@ -44,19 +44,28 @@ curl -H "Authorization: Bearer secret-token-for-postgres" \
   https://secrets.rodaddy.live/secret/MyPassword
 ```
 
-### 3. Maximum Security (OpenClaw)
+### 3. Maximum Security (OpenClaw - mTLS + JWT)
 ```bash
-# Set up client certificates
-export ALLOWED_CLIENT_CERTS="/path/to/allowed-certs.json"
+# Generate certificates (one-time setup)
+cd deploy
+./generate-certs.sh
+# This creates: ca.crt, server.crt, client.crt, and certs.json
 
-# Start server
-SECURITY_PROFILE=openclaw bun run server
+# Configure environment
+export SECURITY_PROFILE=openclaw
+export ALLOWED_CLIENT_CERTS="/opt/vaultwarden-secrets/tls/certs.json"
+export JWT_SECRET="$(openssl rand -hex 32)"
 
-# Test with client cert
-curl --cert client.crt --key client.key \
+# Start server (localhost only)
+bun run server
+
+# Test with client cert + JWT
+curl --cert tls/client.crt --key tls/client.key \
   -H "Authorization: Bearer <jwt-token>" \
-  https://secrets.rodaddy.live/secret/MyPassword
+  https://secrets.local/secret/MyPassword
 ```
+
+See [mTLS Setup Guide](../docs/mtls-setup.md) for full details.
 
 ## API Endpoints
 
@@ -105,6 +114,13 @@ Response:
 | `PORT` | Server port | No (default: 3000) |
 | `HOST` | Bind address | No (default: 0.0.0.0) |
 | `API_TOKEN_<CLIENT>` | Bearer tokens for clients | Yes (im-aware profile) |
+| `OAUTH_CLIENT_ID` | OAuth2 client ID | Yes (im-a-dev profile) |
+| `OAUTH_CLIENT_SECRET` | OAuth2 client secret | Yes (im-a-dev profile) |
+| `ALLOWED_CLIENT_CERTS` | Path to certs.json | Yes (openclaw profile) |
+| `ALLOWED_CERT_FINGERPRINTS` | Inline cert fingerprints | Alternative to ALLOWED_CLIENT_CERTS |
+| `JWT_SECRET` | JWT signing secret | Yes (openclaw/im-a-dev) |
+| `MTLS_MODE` | direct or proxy | No (default: proxy) |
+| `MTLS_HEADER` | Header name for proxy mode | No (default: X-Client-Cert-Fingerprint) |
 | `NODE_ENV` | production prevents feeling-lucky | No |
 
 ## Deployment
@@ -130,6 +146,8 @@ WantedBy=multi-user.target
 ```
 
 ### nginx Reverse Proxy
+
+**Standard (Bearer Auth):**
 ```nginx
 server {
     listen 443 ssl;
@@ -147,12 +165,15 @@ server {
 }
 ```
 
+**mTLS (OpenClaw):**
+See [deploy/nginx-mtls.conf](../deploy/nginx-mtls.conf) for full mTLS configuration with client certificate validation.
+
 ## Roadmap
 
-- [ ] Implement middleware (IP whitelist, rate limiting, audit logging)
-- [ ] OAuth2 provider integration
-- [ ] mTLS certificate validation
-- [ ] Response encryption (double-encrypted secrets)
+- [x] Implement middleware (IP whitelist, rate limiting, audit logging)
+- [x] OAuth2 provider integration
+- [x] mTLS certificate validation
+- [x] Response encryption (double-encrypted secrets)
 - [ ] Anomaly detection and alerts
 - [ ] Search endpoint (`GET /search?q=...`)
 - [ ] MCP server mode for AI agents

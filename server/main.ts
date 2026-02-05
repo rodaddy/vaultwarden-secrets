@@ -9,9 +9,12 @@ import { getProfile, validateProfile } from './profiles';
 import { getSecret, listVaults } from '../index';
 import { ipWhitelist } from './middleware/ip-whitelist';
 import { bearerAuth, loadBearerTokens } from './middleware/bearer-auth';
+import { oauth2Auth } from './middleware/oauth2-auth';
 import { rateLimit } from './middleware/rate-limit';
 import { auditLogger } from './middleware/audit-logger';
 import { detectLocalNetwork } from './utils/network-detect';
+import { responseEncryption } from './middleware/response-encryption';
+import { createAuthRouter, loadOAuthClients } from './routes/auth';
 
 const app = new Hono();
 
@@ -119,9 +122,27 @@ if (profile.auth === 'bearer') {
   app.use('*', bearerAuth({ tokens }));
   console.log(`  ✓ Bearer Auth: ${tokens.size} client(s) configured`);
 } else if (profile.auth === 'oauth2') {
-  console.warn('  ⚠  OAuth2: Not yet implemented');
+  const clients = loadOAuthClients();
+  if (clients.size === 0) {
+    console.error('❌ No OAuth2 clients configured!');
+    console.error('   Set via: export OAUTH_CLIENT_ID=<id> OAUTH_CLIENT_SECRET=<secret>');
+    console.error('   Or set: export OAUTH_CLIENTS_FILE=/path/to/clients.json');
+    process.exit(1);
+  }
+
+  // Mount auth routes
+  const authRouter = createAuthRouter(clients);
+  app.route('/auth', authRouter);
+
+  // Apply OAuth2 middleware
+  app.use('*', oauth2Auth());
+  console.log(`  ✓ OAuth2 Auth: ${clients.size} client(s) configured`);
 } else if (profile.auth === 'mtls+jwt') {
-  console.warn('  ⚠  mTLS+JWT: Not yet implemented');
+  // Apply combined mTLS + JWT middleware
+  const { createCombinedAuth } = await import('./middleware/combined-auth');
+  const combinedAuthMiddleware = await createCombinedAuth();
+  app.use('*', combinedAuthMiddleware);
+  console.log('  ✓ Combined Auth: mTLS + JWT (defense in depth)');
 } else if (profile.auth === false) {
   console.warn('  ⚠  No authentication');
 }
@@ -130,6 +151,12 @@ if (profile.auth === 'bearer') {
 const auditLogFile = process.env.AUDIT_LOG_FILE;
 app.use('*', auditLogger(profile.audit, auditLogFile));
 console.log(`  ✓ Audit Logging: ${profile.audit}${auditLogFile ? ` → ${auditLogFile}` : ' (console only)'}`);
+
+// 5. Response Encryption
+if (profile.secretsEncrypted) {
+  app.use('*', responseEncryption(profile));
+  console.log('  ✓ Response Encryption: ECDH P-256 + AES-256-GCM');
+}
 
 console.log('');
 
@@ -153,9 +180,6 @@ app.get('/secret/:name', async (c: Context) => {
 
   try {
     const value = await getSecret(name, { vault });
-
-    // TODO: Encrypt response if profile.secretsEncrypted === true
-
     return c.json({ value });
   } catch (error) {
     return c.json(
