@@ -1,6 +1,6 @@
 {
   "name": "vaultwarden-secrets",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Secure secrets management library with Vaultwarden/Bitwarden CLI integration, macOS Keychain storage, and encrypted caching",
   "author": "Rico",
   "license": "MIT",

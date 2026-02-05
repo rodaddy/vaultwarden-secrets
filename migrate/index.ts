@@ -63,6 +63,9 @@ export interface MigrateOptions {
 
   /** Auto-confirm all prompts */
   autoConfirm?: boolean;
+
+  /** List only - scan and show, don't migrate */
+  listOnly?: boolean;
 }
 
 /**
@@ -132,6 +135,31 @@ export async function migrate(options: MigrateOptions = {}): Promise<void> {
 
     if (allSecrets.length === 0) {
       console.log(yellow('No secrets detected.'));
+      rl.close();
+      return;
+    }
+
+    // === LIST ONLY MODE: Show secrets and exit ===
+    if (options.listOnly) {
+      console.log(bold('Secrets found:\n'));
+      // Group by file
+      const byFile = new Map<string, DiscoveredSecret[]>();
+      for (const secret of allSecrets) {
+        const existing = byFile.get(secret.sourcePath) || [];
+        existing.push(secret);
+        byFile.set(secret.sourcePath, existing);
+      }
+
+      for (const [file, secrets] of byFile) {
+        console.log(cyan(file));
+        for (const s of secrets) {
+          const conf = s.confidence === 'high' ? green('●') : s.confidence === 'medium' ? yellow('●') : dim('○');
+          console.log(`  ${conf} ${s.name} = ${maskValue(s.value)} ${dim(`(line ${s.lineNumber})`)}`);
+        }
+        console.log('');
+      }
+
+      console.log(dim(`Total: ${allSecrets.length} secrets in ${byFile.size} files`));
       rl.close();
       return;
     }
