@@ -32,6 +32,7 @@
     "example": "bun run example.ts",
     "secret": "bun run bin/secret",
     "server": "bun run server/main.ts",
+    "mcp": "bun run server/mcp.ts",
     "server:dev": "SECURITY_PROFILE=feeling-lucky bun run server/main.ts",
     "server:prod": "SECURITY_PROFILE=im-aware bun run server/main.ts",
     "install-config": "./install.sh",
@@ -41,6 +42,7 @@
     "get": "bun run cli.ts get"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "hono": "^4.11.7",
     "jose": "^6.1.3"
   },

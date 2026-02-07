@@ -4,26 +4,31 @@
 **Project:** vaultwarden-secrets
 
 ## What Got Done
-- Added 5 new API endpoints to match CLI capabilities: `/secrets`, `/secrets/search`, `/secret/:name/fields`, `/cache/stats`, `/cache/clear`
-- Built per-client folder scoping system (`API_FOLDERS_<CLIENT>` env vars) so each bearer token can be restricted to specific VW folders
-- Cleaned up 6 duplicate VW items (freenas x3, truenas01 x2, truenas01.rodaddy.live)
-- Moved 39 homelab items into the `Infrastructure` folder (now 54 items total)
-- Verified all security middleware still enforced on new endpoints (64 server tests pass)
-- End-to-end tested: scoped token sees 54 items, full token sees 1,070
+- Researched LXC deployment architecture for vaultwarden-secrets server (Proxmox, VLAN 20, IP 10.71.20.56)
+- Analyzed BW session management for headless Linux — chose CLI + `--passwordenv` + systemd timer over direct VW API
+- Reviewed 4 articles on Claude Code 2.1 features, Agent Teams, qmd indexing, Opus 4.6
+- Identified 5 actionable improvements: qmd, context:fork, skill-scoped hooks, effort dial, Agent Teams
+- Realized LiteLLM MCP gateway is the right centralization point (not per-machine setup)
+- Wrote full implementation spec at `infrastructure/specs/ai-gateway-mcp/SPEC.md`
+- Fixed session-wrap skill to Read-before-Write and output checkpoint to terminal
+- Updated checkpoint skill to save to `.reports/checkpoint.md` (not project root)
+- Added Session Continuity section to Development CLAUDE.md
 
 ## Key Decisions
-- **Two-token model for CC access:** Scoped token (default, auto-use) restricted to Infrastructure folder; full-access token available but requires CC permission prompt each use
-- **Folder scoping at server level:** Bearer auth middleware carries `clientId`, route handlers call `folderScope.isAllowed()` / `filterItems()`. Items outside scope return 404 (indistinguishable from not existing)
-- **Cache clear refreshes folder scope:** `POST /cache/clear` also calls `folderScope.refresh()` so new items/folder moves are picked up without server restart
-- **Touch ID gating (Option B) deferred:** Would be ideal but biometric-auth binary doesn't support this flow yet
+- **LiteLLM as MCP hub:** qmd + vaultwarden-secrets register as MCP servers in LiteLLM, not configured per-machine
+- **BW session management:** File-based (`/run/vw-session`) with systemd timer refresh every 30 min
+- **qmd replaces Fabric code KB:** Live indexed search via MCP instead of stale markdown summaries
+- **Three-agent implementation:** infra (LiteLLM config), deploy (LXC + server), local (skills + docs)
+- **vaultwarden-secrets needs MCP transport:** Code change needed alongside existing REST endpoints
 
 ## Files Changed
-- `server/main.ts` — Added 5 endpoints, folder scope initialization, per-route scope filtering
-- `server/utils/folder-scope.ts` — New: FolderScope class with isAllowed/filterItems, loadFolderScopes from env
-- `scripts/move-to-infra.ts` — One-time migration script for moving items to Infrastructure folder
+- `infrastructure/specs/ai-gateway-mcp/SPEC.md` — NEW: Full implementation spec with phases, dependency graph, session prompt
+- `/Volumes/ThunderBolt/Development/CLAUDE.md` — Added Session Continuity section
+- `~/.claude/skills/session-wrap/SKILL.md` — Fixed Read-before-Write flow, checkpoint terminal output
+- `~/.config/pai/Skills/checkpoint/SKILL.md` — Fixed file location to `.reports/checkpoint.md`, terminal-first output
 
 ## Next Session
-- Deploy updated server to vault.rodaddy.live with real API tokens
-- Set up CC environment with scoped token (`VAULT_TOKEN`) and full token (`VAULT_ADMIN_TOKEN`)
-- Consider adding `secret folder-move` CLI command for easy ongoing item management
-- Option B (Touch ID gating for full-access token) as future enhancement
+- Answer open questions in spec (VW URL, SMB share, BW API key)
+- Add file-based session fallback to `index.ts` (`BW_SESSION_FILE` env var)
+- Add MCP transport to vaultwarden-secrets server
+- Switch to infrastructure project and run the spec with Agent Teams
