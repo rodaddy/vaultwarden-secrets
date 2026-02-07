@@ -6,7 +6,7 @@
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { getProfile, validateProfile } from './profiles';
-import { getSecret, listVaults } from '../index';
+import { getSecret, getSecretObject, listSecrets, listVaults, clearCache, getCacheStats } from '../index';
 import { ipWhitelist } from './middleware/ip-whitelist';
 import { bearerAuth, loadBearerTokens } from './middleware/bearer-auth';
 import { oauth2Auth } from './middleware/oauth2-auth';
@@ -189,6 +189,93 @@ app.get('/secret/:name', async (c: Context) => {
   }
 });
 
+// Get all fields for a secret
+app.get('/secret/:name/fields', async (c: Context) => {
+  const name = decodeURIComponent(c.req.param('name'));
+  const vault = c.req.query('vault') || 'default';
+
+  try {
+    const fields = await getSecretObject(name, { vault });
+    return c.json({ name, fields });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Item not found';
+    const status = message.includes('locked') ? 503 : 404;
+    return c.json({ error: message }, status);
+  }
+});
+
+// List secrets with optional filter
+app.get('/secrets', async (c: Context) => {
+  const filter = c.req.query('filter');
+  const vault = c.req.query('vault') || 'default';
+
+  try {
+    const secrets = await listSecrets(filter || undefined, { vault });
+    return c.json({ secrets, count: secrets.length });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to list secrets';
+    const status = message.includes('locked') ? 503 : 500;
+    return c.json({ error: message }, status);
+  }
+});
+
+// Fuzzy search secrets
+app.get('/secrets/search', async (c: Context) => {
+  const query = c.req.query('q');
+  if (!query) {
+    return c.json({ error: 'Missing required query parameter: q' }, 400);
+  }
+
+  const vault = c.req.query('vault') || 'default';
+  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100);
+
+  try {
+    const secrets = await listSecrets(undefined, { vault });
+    const lowerQuery = query.toLowerCase();
+
+    const scored = secrets
+      .map((name) => {
+        const lowerName = name.toLowerCase();
+        let score = 0;
+        let queryIdx = 0;
+
+        for (const char of lowerName) {
+          if (queryIdx < lowerQuery.length && char === lowerQuery[queryIdx]) {
+            score += 10;
+            queryIdx++;
+          }
+        }
+
+        if (lowerName.includes(lowerQuery)) score += 50;
+        if (lowerName.startsWith(lowerQuery)) score += 100;
+
+        return { name, score, matched: queryIdx === lowerQuery.length };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+
+    return c.json({ results: scored, query, count: scored.length });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Search failed';
+    const status = message.includes('locked') ? 503 : 500;
+    return c.json({ error: message }, status);
+  }
+});
+
+// Cache stats
+app.get('/cache/stats', (c: Context) => {
+  const stats = getCacheStats();
+  return c.json({ cache: stats });
+});
+
+// Clear cache
+app.post('/cache/clear', async (c: Context) => {
+  const vault = c.req.query('vault');
+  await clearCache(vault || undefined);
+  return c.json({ cleared: true, vault: vault || 'all' });
+});
+
 // Return 405 for unsupported methods on valid paths
 const methodNotAllowed = (c: Context) => {
   return c.json(
@@ -211,6 +298,30 @@ app.post('/secret/:name', methodNotAllowed);
 app.put('/secret/:name', methodNotAllowed);
 app.delete('/secret/:name', methodNotAllowed);
 app.patch('/secret/:name', methodNotAllowed);
+
+app.post('/secret/:name/fields', methodNotAllowed);
+app.put('/secret/:name/fields', methodNotAllowed);
+app.delete('/secret/:name/fields', methodNotAllowed);
+app.patch('/secret/:name/fields', methodNotAllowed);
+
+app.post('/secrets', methodNotAllowed);
+app.put('/secrets', methodNotAllowed);
+app.delete('/secrets', methodNotAllowed);
+app.patch('/secrets', methodNotAllowed);
+
+app.post('/secrets/search', methodNotAllowed);
+app.put('/secrets/search', methodNotAllowed);
+app.delete('/secrets/search', methodNotAllowed);
+app.patch('/secrets/search', methodNotAllowed);
+
+app.post('/cache/stats', methodNotAllowed);
+app.put('/cache/stats', methodNotAllowed);
+app.delete('/cache/stats', methodNotAllowed);
+app.patch('/cache/stats', methodNotAllowed);
+
+app.put('/cache/clear', methodNotAllowed);
+app.delete('/cache/clear', methodNotAllowed);
+app.patch('/cache/clear', methodNotAllowed);
 
 // Start server
 const port = parseInt(process.env.PORT || '3000', 10);
