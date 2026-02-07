@@ -1,43 +1,29 @@
 # Session Summary
 
-**Date:** 2026-02-05
+**Date:** 2026-02-06
 **Project:** vaultwarden-secrets
 
 ## What Got Done
-
-- Created PR #3 for security profiles (merged)
-- Added `secret create` command with `--force` flag
-- Added `secret delete` command with `--force` flag
-- Added `secret unlock` with Touch ID / Apple Watch biometric support
-- Fixed TTY detection for Claude Code compatibility (no more stty errors)
-- Fixed "from clipboard" message to only show when actually from clipboard
-- Added biometric-auth.swift for macOS Keychain + TouchID integration
-- Updated installer with missing functions (detect_os, install_bun, install_bw)
-- Added binary symlink setup (~/.local/bin/secret)
-- Added biometric compilation step to installer
-- Fixed installer to use rsync (handles .git permissions)
-- Ran full QA session (20/20 tests passing)
-- Created PR #4 for CLI improvements (merged)
-- Updated shell aliases in ~/.alias to point to correct binary
-- Stored LiteLLM API key in vault
+- Added 5 new API endpoints to match CLI capabilities: `/secrets`, `/secrets/search`, `/secret/:name/fields`, `/cache/stats`, `/cache/clear`
+- Built per-client folder scoping system (`API_FOLDERS_<CLIENT>` env vars) so each bearer token can be restricted to specific VW folders
+- Cleaned up 6 duplicate VW items (freenas x3, truenas01 x2, truenas01.rodaddy.live)
+- Moved 39 homelab items into the `Infrastructure` folder (now 54 items total)
+- Verified all security middleware still enforced on new endpoints (64 server tests pass)
+- End-to-end tested: scoped token sees 54 items, full token sees 1,070
 
 ## Key Decisions
-
-- Biometric auth stores master password in Keychain with Touch ID protection
-- `--force` flag for non-interactive use in scripts/agents
-- `~/.local/bin` used for symlink (standard location)
-- rsync used instead of cp to handle .git object permissions
+- **Two-token model for CC access:** Scoped token (default, auto-use) restricted to Infrastructure folder; full-access token available but requires CC permission prompt each use
+- **Folder scoping at server level:** Bearer auth middleware carries `clientId`, route handlers call `folderScope.isAllowed()` / `filterItems()`. Items outside scope return 404 (indistinguishable from not existing)
+- **Cache clear refreshes folder scope:** `POST /cache/clear` also calls `folderScope.refresh()` so new items/folder moves are picked up without server restart
+- **Touch ID gating (Option B) deferred:** Would be ideal but biometric-auth binary doesn't support this flow yet
 
 ## Files Changed
-
-- `bin/secret` - Added create, delete, unlock commands; TTY detection
-- `bin/biometric-auth.swift` - New: Touch ID authentication helper
-- `bin/biometric-auth` - Compiled binary
-- `install.sh` - Added helper functions, symlink setup, biometric compilation
-- `~/.alias` - Fixed secret CLI path aliases
+- `server/main.ts` — Added 5 endpoints, folder scope initialization, per-route scope filtering
+- `server/utils/folder-scope.ts` — New: FolderScope class with isAllowed/filterItems, loadFolderScopes from env
+- `scripts/move-to-infra.ts` — One-time migration script for moving items to Infrastructure folder
 
 ## Next Session
-
-- Start HTTP server feature or other CLI improvements
-- Consider adding `secret edit` for interactive editing
-- Test biometric unlock flow on fresh terminal
+- Deploy updated server to vault.rodaddy.live with real API tokens
+- Set up CC environment with scoped token (`VAULT_TOKEN`) and full token (`VAULT_ADMIN_TOKEN`)
+- Consider adding `secret folder-move` CLI command for easy ongoing item management
+- Option B (Touch ID gating for full-access token) as future enhancement
