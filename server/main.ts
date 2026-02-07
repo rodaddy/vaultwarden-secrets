@@ -15,6 +15,7 @@ import { auditLogger } from './middleware/audit-logger';
 import { detectLocalNetwork } from './utils/network-detect';
 import { responseEncryption } from './middleware/response-encryption';
 import { createAuthRouter, loadOAuthClients } from './routes/auth';
+import { FolderScope, loadFolderScopes } from './utils/folder-scope';
 
 const app = new Hono();
 
@@ -158,6 +159,15 @@ if (profile.secretsEncrypted) {
   console.log('  ✓ Response Encryption: ECDH P-256 + AES-256-GCM');
 }
 
+// 6. Folder Scoping (per-client)
+const folderScopeConfig = loadFolderScopes();
+const folderScope = new FolderScope(folderScopeConfig);
+if (folderScopeConfig.size > 0) {
+  await folderScope.initialize();
+} else {
+  console.log('  ℹ Folder Scoping: disabled (no API_FOLDERS_* env vars)');
+}
+
 console.log('');
 
 // List vaults
@@ -177,6 +187,12 @@ app.get('/vaults', async (c: Context) => {
 app.get('/secret/:name', async (c: Context) => {
   const name = decodeURIComponent(c.req.param('name'));
   const vault = c.req.query('vault') || 'default';
+  const clientId = c.get('clientId') as string | undefined;
+
+  // Folder scope check
+  if (clientId && !folderScope.isAllowed(clientId, name)) {
+    return c.json({ error: 'Secret not found' }, 404);
+  }
 
   try {
     const value = await getSecret(name, { vault });
@@ -193,6 +209,12 @@ app.get('/secret/:name', async (c: Context) => {
 app.get('/secret/:name/fields', async (c: Context) => {
   const name = decodeURIComponent(c.req.param('name'));
   const vault = c.req.query('vault') || 'default';
+  const clientId = c.get('clientId') as string | undefined;
+
+  // Folder scope check
+  if (clientId && !folderScope.isAllowed(clientId, name)) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
 
   try {
     const fields = await getSecretObject(name, { vault });
@@ -208,9 +230,16 @@ app.get('/secret/:name/fields', async (c: Context) => {
 app.get('/secrets', async (c: Context) => {
   const filter = c.req.query('filter');
   const vault = c.req.query('vault') || 'default';
+  const clientId = c.get('clientId') as string | undefined;
 
   try {
-    const secrets = await listSecrets(filter || undefined, { vault });
+    let secrets = await listSecrets(filter || undefined, { vault });
+
+    // Apply folder scope filtering
+    if (clientId) {
+      secrets = folderScope.filterItems(clientId, secrets);
+    }
+
     return c.json({ secrets, count: secrets.length });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to list secrets';
@@ -228,9 +257,16 @@ app.get('/secrets/search', async (c: Context) => {
 
   const vault = c.req.query('vault') || 'default';
   const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100);
+  const clientId = c.get('clientId') as string | undefined;
 
   try {
-    const secrets = await listSecrets(undefined, { vault });
+    let secrets = await listSecrets(undefined, { vault });
+
+    // Apply folder scope filtering before search
+    if (clientId) {
+      secrets = folderScope.filterItems(clientId, secrets);
+    }
+
     const lowerQuery = query.toLowerCase();
 
     const scored = secrets
@@ -269,10 +305,11 @@ app.get('/cache/stats', (c: Context) => {
   return c.json({ cache: stats });
 });
 
-// Clear cache
+// Clear cache (also refreshes folder scope mappings)
 app.post('/cache/clear', async (c: Context) => {
   const vault = c.req.query('vault');
   await clearCache(vault || undefined);
+  await folderScope.refresh();
   return c.json({ cleared: true, vault: vault || 'all' });
 });
 
