@@ -155,6 +155,53 @@ function buildFieldsObject(item: any): Record<string, string> {
 }
 
 /**
+ * Resolve a Vaultwarden item by exact name, handling BW CLI multi-result ambiguity.
+ *
+ * Fast path: `bw get item <name>` works for unambiguous names.
+ * Fallback: On "More than one result", uses `bw list items --search` and
+ * filters for exact name match.
+ *
+ * @param session - BW_SESSION token
+ * @param name - Exact item name to look up
+ * @returns Parsed item object
+ * @throws {SecretError} If item not found
+ * @throws Re-throws non-ambiguity BW errors
+ *
+ * @example
+ * const item = await getItemByName(session, 'LiteLLM');
+ * // Works even if "LiteLLM API Key" also exists
+ */
+export async function getItemByName(session: string, name: string): Promise<any> {
+  // Fast path: try direct lookup
+  try {
+    const result = await $`BW_SESSION=${session} bw get item ${name}`.quiet();
+    return JSON.parse(result.stdout.toString());
+  } catch (error: any) {
+    const stderr = error.stderr?.toString() || '';
+
+    // Only handle multi-result — re-throw everything else
+    if (!stderr.includes('More than one result')) {
+      throw error;
+    }
+  }
+
+  // Fallback: list + exact filter
+  const listResult = await $`BW_SESSION=${session} bw list items --search ${name}`.quiet();
+  const items = JSON.parse(listResult.stdout.toString());
+  const exactMatches = items.filter((item: any) => item.name === name);
+
+  if (exactMatches.length === 0) {
+    throw new SecretError(`Item not found: ${name}`, ErrorCode.SECRET_NOT_FOUND);
+  }
+
+  if (exactMatches.length > 1) {
+    console.error(`[warn] Multiple items named "${name}" — using first match (id: ${exactMatches[0].id})`);
+  }
+
+  return exactMatches[0];
+}
+
+/**
  * Extract field value from Vaultwarden item
  *
  * Handles custom fields, nested field paths, and smart fallback logic.
@@ -266,8 +313,7 @@ export async function getSecret(
   let bwError: Error | null = null;
   if (session) {
     try {
-      const result = await $`BW_SESSION=${session} bw get item ${parsed.item}`.quiet();
-      const item = JSON.parse(result.stdout.toString());
+      const item = await getItemByName(session, parsed.item);
 
       // Extract field value using standalone function
       const value = extractFieldFromItem(item, parsed);
@@ -370,8 +416,7 @@ export async function getSecretObject(
   let bwError: Error | null = null;
   if (session) {
     try {
-      const result = await $`BW_SESSION=${session} bw get item ${resolvedItem}`.quiet();
-      const item = JSON.parse(result.stdout.toString());
+      const item = await getItemByName(session, resolvedItem);
 
       return buildFieldsObject(item);
     } catch (error) {

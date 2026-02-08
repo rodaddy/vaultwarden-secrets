@@ -1,34 +1,26 @@
 # Session Summary
 
-**Date:** 2026-02-06
+**Date:** 2026-02-08
 **Project:** vaultwarden-secrets
 
 ## What Got Done
-- Researched LXC deployment architecture for vaultwarden-secrets server (Proxmox, VLAN 20, IP 10.71.20.56)
-- Analyzed BW session management for headless Linux — chose CLI + `--passwordenv` + systemd timer over direct VW API
-- Reviewed 4 articles on Claude Code 2.1 features, Agent Teams, qmd indexing, Opus 4.6
-- Identified 5 actionable improvements: qmd, context:fork, skill-scoped hooks, effort dial, Agent Teams
-- Realized LiteLLM MCP gateway is the right centralization point (not per-machine setup)
-- Wrote full implementation spec at `infrastructure/specs/ai-gateway-mcp/SPEC.md`
-- Fixed session-wrap skill to Read-before-Write and output checkpoint to terminal
-- Updated checkpoint skill to save to `.reports/checkpoint.md` (not project root)
-- Added Session Continuity section to Development CLAUDE.md
+- Fixed BW CLI multi-result ambiguity bug: `secret get "LiteLLM"` failed when "LiteLLM API Key" also existed
+- Created `getItemByName()` helper in `index.ts` — fast path with `bw get item`, fallback to `bw list items --search` + exact name filter on "More than one result" error
+- Replaced all 6 raw `bw get item` call sites across 3 files with `getItemByName()`
+- Verified: 184 tests pass, zero type errors (`tsc --noEmit` clean)
 
 ## Key Decisions
-- **LiteLLM as MCP hub:** qmd + vaultwarden-secrets register as MCP servers in LiteLLM, not configured per-machine
-- **BW session management:** File-based (`/run/vw-session`) with systemd timer refresh every 30 min
-- **qmd replaces Fabric code KB:** Live indexed search via MCP instead of stale markdown summaries
-- **Three-agent implementation:** infra (LiteLLM config), deploy (LXC + server), local (skills + docs)
-- **vaultwarden-secrets needs MCP transport:** Code change needed alongside existing REST endpoints
+- **Single helper, not per-site fixes:** All 6 call sites (2 in index.ts, 3 in bin/secret, 1 in migrate/executor.ts) now funnel through one function
+- **Fast path first:** Direct `bw get item` for the 90% unambiguous case, `bw list items --search` only on multi-result error — avoids fetching all items unnecessarily
+- **Server gets fix for free:** Server routes (`/secret/:name`, `/secret/:name/fields`) call `getSecret()`/`getSecretObject()` which now use `getItemByName()` internally
 
 ## Files Changed
-- `infrastructure/specs/ai-gateway-mcp/SPEC.md` — NEW: Full implementation spec with phases, dependency graph, session prompt
-- `/Volumes/ThunderBolt/Development/CLAUDE.md` — Added Session Continuity section
-- `~/.claude/skills/session-wrap/SKILL.md` — Fixed Read-before-Write flow, checkpoint terminal output
-- `~/.config/pai/Skills/checkpoint/SKILL.md` — Fixed file location to `.reports/checkpoint.md`, terminal-first output
+- `index.ts` — Added exported `getItemByName()` helper; replaced `bw get item` in `getSecret()` and `getSecretObject()`
+- `bin/secret` — Imported `getItemByName`; replaced `bw get item` in `updateItemValue()`, `handleCreate()`, `handleDelete()`
+- `migrate/executor.ts` — Imported `getItemByName`; replaced `bw get item` in `verifySecrets()`
 
 ## Next Session
-- Answer open questions in spec (VW URL, SMB share, BW API key)
-- Add file-based session fallback to `index.ts` (`BW_SESSION_FILE` env var)
-- Add MCP transport to vaultwarden-secrets server
-- Switch to infrastructure project and run the spec with Agent Teams
+- Deploy updated server to LXC 214 (picks up the multi-result fix)
+- Wire vaultwarden-secrets as MCP server into LiteLLM gateway
+- Test end-to-end: `secret get "LiteLLM"` on live vault
+- LiteLLM MCP gateway spec at `infrastructure/specs/ai-gateway-mcp/SPEC.md`
