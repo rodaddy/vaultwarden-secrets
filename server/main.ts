@@ -16,6 +16,8 @@ import { detectLocalNetwork } from './utils/network-detect';
 import { responseEncryption } from './middleware/response-encryption';
 import { createAuthRouter, loadOAuthClients } from './routes/auth';
 import { FolderScope, loadFolderScopes } from './utils/folder-scope';
+import { snapshotManager } from '../snapshot';
+import { getVaultSession } from '../keychain';
 
 const app = new Hono();
 
@@ -313,6 +315,33 @@ app.post('/cache/clear', async (c: Context) => {
   return c.json({ cleared: true, vault: vault || 'all' });
 });
 
+// Get snapshot metadata
+app.get('/snapshot/info', async (c: Context) => {
+  const metadata = await snapshotManager.getMetadata();
+  if (!metadata) {
+    return c.json({ error: 'No snapshot found' }, 404);
+  }
+  return c.json({ metadata });
+});
+
+// Create new snapshot
+app.post('/snapshot/create', async (c: Context) => {
+  const session = await getVaultSession('default');
+  if (!session) {
+    return c.json({ error: 'No vault session. Run: bw unlock' }, 503);
+  }
+
+  try {
+    const metadata = await snapshotManager.createSnapshot('default', session);
+    return c.json({ created: true, metadata });
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : 'Snapshot creation failed' },
+      500
+    );
+  }
+});
+
 // Return 405 for unsupported methods on valid paths
 const methodNotAllowed = (c: Context) => {
   return c.json(
@@ -359,6 +388,15 @@ app.patch('/cache/stats', methodNotAllowed);
 app.put('/cache/clear', methodNotAllowed);
 app.delete('/cache/clear', methodNotAllowed);
 app.patch('/cache/clear', methodNotAllowed);
+
+app.post('/snapshot/info', methodNotAllowed);
+app.put('/snapshot/info', methodNotAllowed);
+app.delete('/snapshot/info', methodNotAllowed);
+app.patch('/snapshot/info', methodNotAllowed);
+
+app.put('/snapshot/create', methodNotAllowed);
+app.delete('/snapshot/create', methodNotAllowed);
+app.patch('/snapshot/create', methodNotAllowed);
 
 // Start server
 const port = parseInt(process.env.PORT || '3000', 10);

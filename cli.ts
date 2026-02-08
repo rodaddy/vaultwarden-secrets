@@ -12,6 +12,8 @@
 
 import { getSecret, setSession, listVaults } from './index';
 import { secretCache } from './cache';
+import { snapshotManager } from './snapshot';
+import { getVaultSession } from './keychain';
 
 // Colors
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
@@ -97,6 +99,45 @@ async function main() {
         break;
       }
 
+      case 'snapshot': {
+        const isInfo = commandArgs.includes('--info');
+
+        if (isInfo) {
+          // Show existing snapshot metadata without creating
+          const metadata = await snapshotManager.getMetadata();
+          if (!metadata) {
+            console.log(yellow('No snapshot found'));
+            console.log(dim('Run "bun run cli.ts snapshot" to create one'));
+          } else {
+            console.log(bold('Snapshot Metadata:'));
+            console.log(`  Vault:       ${metadata.vaultId}`);
+            console.log(`  Items:       ${metadata.itemCount}`);
+            console.log(`  Size:        ${(metadata.fileSizeBytes / 1024).toFixed(1)} KB`);
+            console.log(`  Created:     ${new Date(metadata.createdAt).toLocaleString()}`);
+            const stalenessColor = metadata.isStale ? yellow : green;
+            console.log(`  Status:      ${stalenessColor(metadata.isStale ? 'stale' : 'fresh')}`);
+          }
+        } else {
+          // Create new snapshot
+          const session = await getVaultSession('default');
+          if (!session) {
+            console.error(red('No session found for default vault'));
+            console.error(dim('Run "bun run cli.ts set-session default <session>" first'));
+            process.exit(1);
+          }
+
+          console.log(dim('Creating snapshot...'));
+          const metadata = await snapshotManager.createSnapshot('default', session);
+
+          console.log(green('✓ Snapshot created'));
+          console.log(`  Vault:       ${metadata.vaultId}`);
+          console.log(`  Items:       ${metadata.itemCount}`);
+          console.log(`  Size:        ${(metadata.fileSizeBytes / 1024).toFixed(1)} KB`);
+          console.log(`  Created:     ${new Date(metadata.createdAt).toLocaleString()}`);
+        }
+        break;
+      }
+
       case 'help':
       case '--help':
       case undefined: {
@@ -109,6 +150,8 @@ ${bold('Commands:')}
   list-vaults                    List configured vaults
   cache-stats                    Show cache statistics
   clear-cache [vault]            Clear cache
+  snapshot                       Create new snapshot
+  snapshot --info                Show existing snapshot metadata
 
 ${bold('Examples:')}
   # Store session for default vault
@@ -124,6 +167,10 @@ ${bold('Examples:')}
   # Clear cache
   bun run cli.ts clear-cache
   bun run cli.ts clear-cache work
+
+  # Snapshot operations
+  bun run cli.ts snapshot
+  bun run cli.ts snapshot --info
 `);
         break;
       }

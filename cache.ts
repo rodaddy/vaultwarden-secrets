@@ -106,13 +106,13 @@ export class SecretCache {
       const content = readFileSync(this.cachePath, 'utf-8');
       const cacheFile = JSON.parse(content) as CacheFile;
 
-      // Verify HMAC integrity
+      // Verify HMAC integrity — treat failures as cache miss (stale key)
       const entriesJson = JSON.stringify(cacheFile.entries);
       if (!verifyHmac(entriesJson, masterKey, cacheFile.hmac)) {
-        throw new SecretError(
-          'Cache integrity check failed',
-          ErrorCode.CACHE_ERROR
-        );
+        // Master key changed (process restart without MASTER_KEY_FILE) — discard stale cache
+        try { const { unlinkSync } = await import('node:fs'); unlinkSync(this.cachePath); } catch {}
+        this.loaded = true;
+        return;
       }
 
       // Load entries

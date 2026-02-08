@@ -9,6 +9,7 @@
  * - get_secret: Get a secret value by name/path
  * - get_secret_fields: Get all fields for a secret item
  * - list_secrets: List available secrets with optional filter
+ * - snapshot_info: Get vault snapshot metadata (age, item count, staleness)
  *
  * @module server/mcp
  */
@@ -19,6 +20,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import { getSecret, getSecretObject, listSecrets } from '../index';
+import { snapshotManager } from '../snapshot';
 import { loadBearerTokens } from './middleware/bearer-auth';
 import { FolderScope, loadFolderScopes } from './utils/folder-scope';
 
@@ -57,147 +59,173 @@ if (folderScopeConfig.size > 0) {
 }
 
 // ============================================================================
-// MCP Server
+// MCP Server factory — creates a fresh instance per session to avoid
+// "Already connected to a transport" errors
 // ============================================================================
 
-const mcpServer = new McpServer({
-  name: 'vaultwarden-secrets',
-  version: '0.5.2',
-});
+function createMcpServer(): McpServer {
+  const server = new McpServer({
+    name: 'vaultwarden-secrets',
+    version: '0.5.2',
+  });
 
-// Register tools
+  server.tool(
+    'search_secrets',
+    'Fuzzy search for secrets by name',
+    {
+      query: z.string().describe('Search query'),
+      limit: z.number().optional().default(20).describe('Max results'),
+      vault: z.string().optional().describe('Vault ID (default: "default")'),
+    },
+    async ({ query, limit, vault }) => {
+      try {
+        let secrets = await listSecrets(undefined, { vault });
+        const lowerQuery = query.toLowerCase();
 
-mcpServer.tool(
-  'search_secrets',
-  'Fuzzy search for secrets by name',
-  {
-    query: z.string().describe('Search query'),
-    limit: z.number().optional().default(20).describe('Max results'),
-    vault: z.string().optional().describe('Vault ID (default: "default")'),
-  },
-  async ({ query, limit, vault }) => {
-    try {
-      let secrets = await listSecrets(undefined, { vault });
-      const lowerQuery = query.toLowerCase();
+        const scored = secrets
+          .map((name) => {
+            const lowerName = name.toLowerCase();
+            let score = 0;
+            let queryIdx = 0;
 
-      const scored = secrets
-        .map((name) => {
-          const lowerName = name.toLowerCase();
-          let score = 0;
-          let queryIdx = 0;
-
-          for (const char of lowerName) {
-            if (queryIdx < lowerQuery.length && char === lowerQuery[queryIdx]) {
-              score += 10;
-              queryIdx++;
+            for (const char of lowerName) {
+              if (queryIdx < lowerQuery.length && char === lowerQuery[queryIdx]) {
+                score += 10;
+                queryIdx++;
+              }
             }
-          }
 
-          if (lowerName.includes(lowerQuery)) score += 50;
-          if (lowerName.startsWith(lowerQuery)) score += 100;
+            if (lowerName.includes(lowerQuery)) score += 50;
+            if (lowerName.startsWith(lowerQuery)) score += 100;
 
-          return { name, score, matched: queryIdx === lowerQuery.length };
-        })
-        .filter((item) => item.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limit);
+            return { name, score, matched: queryIdx === lowerQuery.length };
+          })
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
 
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(scored, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-        isError: true,
-      };
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(scored, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
     }
-  }
-);
+  );
 
-mcpServer.tool(
-  'get_secret',
-  'Get a secret value by name',
-  {
-    name: z.string().describe('Secret name or path (e.g. "github-pat", "github-pat.login.password")'),
-    vault: z.string().optional().describe('Vault ID (default: "default")'),
-  },
-  async ({ name, vault }) => {
-    try {
-      const value = await getSecret(name, { vault });
-      return {
-        content: [{ type: 'text' as const, text: value }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-        isError: true,
-      };
+  server.tool(
+    'get_secret',
+    'Get a secret value by name',
+    {
+      name: z.string().describe('Secret name or path (e.g. "github-pat", "github-pat.login.password")'),
+      vault: z.string().optional().describe('Vault ID (default: "default")'),
+    },
+    async ({ name, vault }) => {
+      try {
+        const value = await getSecret(name, { vault });
+        return {
+          content: [{ type: 'text' as const, text: value }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
     }
-  }
-);
+  );
 
-mcpServer.tool(
-  'get_secret_fields',
-  'Get all fields for a secret item',
-  {
-    name: z.string().describe('Secret item name'),
-    vault: z.string().optional().describe('Vault ID'),
-  },
-  async ({ name, vault }) => {
-    try {
-      const fields = await getSecretObject(name, { vault });
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(fields, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-        isError: true,
-      };
+  server.tool(
+    'get_secret_fields',
+    'Get all fields for a secret item',
+    {
+      name: z.string().describe('Secret item name'),
+      vault: z.string().optional().describe('Vault ID'),
+    },
+    async ({ name, vault }) => {
+      try {
+        const fields = await getSecretObject(name, { vault });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(fields, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
     }
-  }
-);
+  );
 
-mcpServer.tool(
-  'list_secrets',
-  'List available secrets with optional filter',
-  {
-    filter: z.string().optional().describe('Filter string (case-insensitive)'),
-    vault: z.string().optional().describe('Vault ID'),
-  },
-  async ({ filter, vault }) => {
-    try {
-      const secrets = await listSecrets(filter || undefined, { vault });
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(secrets, null, 2) }],
-      };
-    } catch (error) {
-      return {
-        content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-        isError: true,
-      };
+  server.tool(
+    'list_secrets',
+    'List available secrets with optional filter',
+    {
+      filter: z.string().optional().describe('Filter string (case-insensitive)'),
+      vault: z.string().optional().describe('Vault ID'),
+    },
+    async ({ filter, vault }) => {
+      try {
+        const secrets = await listSecrets(filter || undefined, { vault });
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(secrets, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
     }
-  }
-);
+  );
 
-// Register a simple info resource
-mcpServer.resource(
-  'server-info',
-  'vaultwarden://info',
-  async () => ({
-    contents: [
-      {
-        uri: 'vaultwarden://info',
-        mimeType: 'application/json',
-        text: JSON.stringify({
-          name: 'vaultwarden-secrets',
-          version: '0.5.2',
-          tools: ['search_secrets', 'get_secret', 'get_secret_fields', 'list_secrets'],
-        }),
-      },
-    ],
-  })
-);
+  server.tool(
+    'snapshot_info',
+    'Get vault snapshot metadata (age, item count, staleness)',
+    {},
+    async () => {
+      try {
+        const metadata = await snapshotManager.getMetadata();
+        if (!metadata) {
+          return {
+            content: [{ type: 'text' as const, text: 'No snapshot exists' }],
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(metadata, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.resource(
+    'server-info',
+    'vaultwarden://info',
+    async () => ({
+      contents: [
+        {
+          uri: 'vaultwarden://info',
+          mimeType: 'application/json',
+          text: JSON.stringify({
+            name: 'vaultwarden-secrets',
+            version: '0.5.2',
+            tools: ['search_secrets', 'get_secret', 'get_secret_fields', 'list_secrets', 'snapshot_info'],
+          }),
+        },
+      ],
+    })
+  );
+
+  return server;
+}
 
 // ============================================================================
 // HTTP transport via Hono
@@ -245,6 +273,7 @@ app.all('/mcp', async (c) => {
         }
       };
 
+      const mcpServer = createMcpServer();
       await mcpServer.connect(transport);
 
       const response = await transport.handleRequest(c.req.raw, { parsedBody: body });
