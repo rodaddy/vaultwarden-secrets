@@ -5,7 +5,7 @@
 set -eu
 
 REPO_DIR="/opt/vaultwarden-secrets"
-BRANCH="${DEPLOY_BRANCH:-feature/installer-cli}"
+BRANCH="${DEPLOY_BRANCH:-develop}"
 
 cd "$REPO_DIR"
 
@@ -30,5 +30,6 @@ bun install --frozen-lockfile 2>/dev/null || bun install
 # Restart services
 systemctl restart vaultwarden-secrets.service
 systemctl restart vaultwarden-secrets-mcp.service
+systemctl restart vw-cred-proxy.service 2>/dev/null || true
 
 echo "[deploy] Services restarted"

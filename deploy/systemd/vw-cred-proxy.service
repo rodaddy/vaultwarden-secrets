@@ -1,0 +1,16 @@
+[Unit]
+Description=Vaultwarden Credential Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vaultwarden-secrets
+Environment=BW_SESSION_FILE=/root/.bw-session
+Environment=PROXY_PORT=3003
+EnvironmentFile=-/opt/vaultwarden-secrets/.env.cred-proxy
+ExecStart=/root/.bun/bin/bun run server/cred-proxy.ts
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
