@@ -5,6 +5,8 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/vaultwarden-secrets
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.bun/bin
 Environment=BW_SESSION_FILE=/root/.bw-session
 Environment=PROXY_PORT=3003
 EnvironmentFile=-/opt/vaultwarden-secrets/.env.cred-proxy
