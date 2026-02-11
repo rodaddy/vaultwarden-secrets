@@ -392,8 +392,20 @@ export const Constants = {
   /** Cache file path */
   get CACHE_PATH() { return require('node:path').join(getConfigDir(), 'cache.json'); },
 
+  /** Snapshot file path */
+  get SNAPSHOT_PATH() { return require('node:path').join(getConfigDir(), 'snapshot.enc'); },
+
   /** Default vaults directory */
   get VAULTS_DIR() { return require('node:path').join(getConfigDir(), 'vaults'); },
+
+  /** Age threshold before snapshot is considered "stale" (30 minutes) */
+  SNAPSHOT_WARN_AGE_MS: 30 * 60 * 1000,
+
+  /** Age threshold before snapshot is definitely stale (2 hours) */
+  SNAPSHOT_STALE_AGE_MS: 2 * 60 * 60 * 1000,
+
+  /** Timeout for snapshot operations (30 seconds) */
+  SNAPSHOT_TIMEOUT_MS: 30_000,
 } as const;
 
 // ============================================================================

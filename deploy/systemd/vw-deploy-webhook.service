@@ -1,0 +1,15 @@
+[Unit]
+Description=Vaultwarden Secrets Deploy Trigger
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vaultwarden-secrets
+ExecStart=/root/.bun/bin/bun run deploy/webhook.ts
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.bun/bin
+
+[Install]
+WantedBy=multi-user.target

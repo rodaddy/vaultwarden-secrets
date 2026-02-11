@@ -1,0 +1,10 @@
+[Unit]
+Description=Vaultwarden Secrets Auto-Deploy
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-secrets
+ExecStart=/opt/vaultwarden-secrets/deploy/deploy.sh
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.bun/bin

@@ -1,0 +1,10 @@
+[Unit]
+Description=Vaultwarden Vault Snapshot
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/vaultwarden-secrets
+Environment="SECURITY_PROFILE=im-aware"
+ExecStart=/root/.bun/bin/bun run cli.ts snapshot

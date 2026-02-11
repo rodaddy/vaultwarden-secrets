@@ -12,11 +12,13 @@ import {
   SecretOptions,
   SecretError,
   ErrorCode,
-  CacheStats
+  CacheStats,
+  Constants
 } from './types';
 import { secretCache } from './cache';
 import { vaultManager } from './vault-config';
 import { getVaultSession, setVaultSession } from './keychain';
+import { snapshotManager } from './snapshot';
 
 /**
  * Internal parsed secret path with custom field support
@@ -60,7 +62,7 @@ function applyFolder(path: string, folder: string): string {
 }
 
 /**
- * Parse secret path like "Item.field" or "Item.fields.CUSTOM"
+ * Parse secret path with support for standard and custom fields
  *
  * @param path - Secret path to parse
  * @returns Parsed path components
@@ -120,6 +122,146 @@ function parseSecretPath(path: string): ExtendedParsedPath {
 }
 
 /**
+ * Build a Record<string, string> from all fields in a Vaultwarden item
+ *
+ * @param item - Vaultwarden item object
+ * @returns Object with all fields as key-value pairs
+ *
+ * @example
+ * buildFieldsObject(item) // { username: '...', password: '...', uri: '...', API_KEY: '...' }
+ */
+function buildFieldsObject(item: any): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  // Add login fields
+  if (item.login) {
+    if (item.login.username) result.username = item.login.username;
+    if (item.login.password) result.password = item.login.password;
+    if (item.login.uris?.[0]?.uri) result.uri = item.login.uris[0].uri;
+    if (item.login.totp) result.totp = item.login.totp;
+  }
+
+  // Add notes
+  if (item.notes) result.notes = item.notes;
+
+  // Add custom fields
+  if (item.fields) {
+    for (const field of item.fields) {
+      result[field.name] = String(field.value);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Resolve a Vaultwarden item by exact name, handling BW CLI multi-result ambiguity.
+ *
+ * Fast path: `bw get item <name>` works for unambiguous names.
+ * Fallback: On "More than one result", uses `bw list items --search` and
+ * filters for exact name match.
+ *
+ * @param session - BW_SESSION token
+ * @param name - Exact item name to look up
+ * @returns Parsed item object
+ * @throws {SecretError} If item not found
+ * @throws Re-throws non-ambiguity BW errors
+ *
+ * @example
+ * const item = await getItemByName(session, 'LiteLLM');
+ * // Works even if "LiteLLM API Key" also exists
+ */
+export async function getItemByName(session: string, name: string): Promise<any> {
+  // Fast path: try direct lookup
+  try {
+    const result = await $`BW_SESSION=${session} bw get item ${name}`.quiet();
+    return JSON.parse(result.stdout.toString());
+  } catch (error: any) {
+    const stderr = error.stderr?.toString() || '';
+
+    // Only handle multi-result — re-throw everything else
+    if (!stderr.includes('More than one result')) {
+      throw error;
+    }
+  }
+
+  // Fallback: list + exact filter
+  const listResult = await $`BW_SESSION=${session} bw list items --search ${name}`.quiet();
+  const items = JSON.parse(listResult.stdout.toString());
+  const exactMatches = items.filter((item: any) => item.name === name);
+
+  if (exactMatches.length === 0) {
+    throw new SecretError(`Item not found: ${name}`, ErrorCode.SECRET_NOT_FOUND);
+  }
+
+  if (exactMatches.length > 1) {
+    console.error(`[warn] Multiple items named "${name}" — using first match (id: ${exactMatches[0].id})`);
+  }
+
+  return exactMatches[0];
+}
+
+/**
+ * Extract field value from Vaultwarden item
+ *
+ * Handles custom fields, nested field paths, and smart fallback logic.
+ *
+ * @param item - Vaultwarden item object
+ * @param parsed - Parsed path with field/customField specifiers
+ * @returns Extracted field value
+ * @throws {SecretError} If field not found
+ *
+ * @example
+ * extractFieldFromItem(item, { customField: 'API_KEY' }) // from item.fields
+ * extractFieldFromItem(item, { field: 'login.password' }) // from item.login.password
+ * extractFieldFromItem(item, {}) // smart fallback: password → notes → first custom field
+ */
+export function extractFieldFromItem(item: any, parsed: { field?: string; customField?: string }): string {
+  if (parsed.customField) {
+    // Look in custom fields array
+    const field = item.fields?.find((f: any) => f.name === parsed.customField);
+    if (!field) {
+      throw new SecretError(
+        `Custom field not found: ${parsed.customField}`,
+        ErrorCode.SECRET_NOT_FOUND
+      );
+    }
+    return field.value;
+  } else if (parsed.field) {
+    // Navigate to nested field (e.g., "login.password", "login.username")
+    const parts = parsed.field.split('.');
+    let current: any = item;
+
+    for (const part of parts) {
+      current = current?.[part];
+      if (current === undefined) {
+        throw new SecretError(
+          `Field not found: ${parsed.field}`,
+          ErrorCode.SECRET_NOT_FOUND
+        );
+      }
+    }
+
+    return typeof current === 'string' ? current : JSON.stringify(current);
+  } else {
+    // Smart fallback: try password → notes → first custom field
+    if (item.login?.password) {
+      return item.login.password;
+    } else if (item.notes) {
+      return item.notes;
+    } else if (item.fields?.length > 0) {
+      // Try first custom field
+      return item.fields[0].value;
+    } else {
+      throw new SecretError(
+        `No value found in item (no password, notes, or custom fields)`,
+        ErrorCode.SECRET_NOT_FOUND
+      );
+    }
+  }
+}
+
+/**
  * Get a secret from Vaultwarden with caching
  *
  * @param path - Secret path (e.g., "github-pat", "github-pat.password", "github-pat.fields.API_KEY")
@@ -166,6 +308,52 @@ export async function getSecret(
 
   // Get session token from Keychain
   const session = await getVaultSession(vaultId);
+
+  // Try BW if session exists
+  let bwError: Error | null = null;
+  if (session) {
+    try {
+      const item = await getItemByName(session, parsed.item);
+
+      // Extract field value using standalone function
+      const value = extractFieldFromItem(item, parsed);
+
+      // Cache the result
+      await secretCache.set(resolvedPath, value, vaultId, options.category);
+
+      return value;
+    } catch (error) {
+      if (error instanceof SecretError) throw error;
+
+      // Store error for snapshot fallback
+      bwError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  // No session OR BW failed - try snapshot fallback
+  const snapshotItem = await snapshotManager.getItem(parsed.item);
+  if (snapshotItem) {
+    try {
+      const value = extractFieldFromItem(snapshotItem, parsed);
+
+      // Log warning about snapshot source
+      const meta = await snapshotManager.getMetadata();
+      if (meta) {
+        const ageMs = Date.now() - new Date(meta.createdAt).getTime();
+        if (ageMs > Constants.SNAPSHOT_STALE_AGE_MS) {
+          console.error(`[snapshot] WARNING: serving stale data for "${parsed.item}" (age: ${Math.round(ageMs / 60000)}min)`);
+        } else if (ageMs > Constants.SNAPSHOT_WARN_AGE_MS) {
+          console.error(`[snapshot] INFO: serving from snapshot for "${parsed.item}" (age: ${Math.round(ageMs / 60000)}min)`);
+        }
+      }
+
+      return value;
+    } catch (snapshotError) {
+      // Fall through to throw error
+    }
+  }
+
+  // Both BW and snapshot failed - throw appropriate error
   if (!session) {
     throw new SecretError(
       `No session for vault: ${vaultId}. Run: bw unlock`,
@@ -173,85 +361,27 @@ export async function getSecret(
     );
   }
 
-  // Fetch from Vaultwarden
-  try {
-    const result = await $`BW_SESSION=${session} bw get item ${parsed.item}`.quiet();
-    const item = JSON.parse(result.stdout.toString());
-
-    let value: string;
-
-    if (parsed.customField) {
-      // Look in custom fields array
-      const field = item.fields?.find((f: any) => f.name === parsed.customField);
-      if (!field) {
-        throw new SecretError(
-          `Custom field not found: ${parsed.customField}`,
-          ErrorCode.SECRET_NOT_FOUND
-        );
-      }
-      value = field.value;
-    } else if (parsed.field) {
-      // Navigate to nested field (e.g., "login.password", "login.username")
-      const parts = parsed.field.split('.');
-      let current: any = item;
-
-      for (const part of parts) {
-        current = current?.[part];
-        if (current === undefined) {
-          throw new SecretError(
-            `Field not found: ${parsed.field}`,
-            ErrorCode.SECRET_NOT_FOUND
-          );
-        }
-      }
-
-      value = typeof current === 'string' ? current : JSON.stringify(current);
-    } else {
-      // Smart fallback: try password → notes → first custom field
-      if (item.login?.password) {
-        value = item.login.password;
-      } else if (item.notes) {
-        value = item.notes;
-      } else if (item.fields?.length > 0) {
-        // Try first custom field
-        value = item.fields[0].value;
-      } else {
-        throw new SecretError(
-          `No value found in item: ${parsed.item} (no password, notes, or custom fields)`,
-          ErrorCode.SECRET_NOT_FOUND
-        );
-      }
-    }
-
-    // Cache the result
-    await secretCache.set(resolvedPath, value, vaultId, options.category);
-
-    return value;
-  } catch (error) {
-    if (error instanceof SecretError) throw error;
-
-    // Check for common bw errors
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('vault is locked')) {
-      throw new SecretError(
-        `Vault is locked: ${vaultId}. Run: bw unlock`,
-        ErrorCode.VAULT_LOCKED
-      );
-    }
-    if (message.includes('not found')) {
-      throw new SecretError(
-        `Item not found: ${parsed.item}`,
-        ErrorCode.SECRET_NOT_FOUND
-      );
-    }
-
+  // Had session but BW failed
+  const message = bwError ? bwError.message : '';
+  if (message.includes('vault is locked')) {
     throw new SecretError(
-      `Failed to get secret: ${path}`,
-      ErrorCode.VAULT_CORRUPTED,
-      true,
-      error instanceof Error ? error : undefined
+      `Vault is locked: ${vaultId}. Run: bw unlock`,
+      ErrorCode.VAULT_LOCKED
     );
   }
+  if (message.includes('not found')) {
+    throw new SecretError(
+      `Item not found: ${parsed.item}`,
+      ErrorCode.SECRET_NOT_FOUND
+    );
+  }
+
+  throw new SecretError(
+    `Failed to get secret: ${path}`,
+    ErrorCode.VAULT_CORRUPTED,
+    true,
+    bwError || undefined
+  );
 }
 
 /**
@@ -282,6 +412,43 @@ export async function getSecretObject(
   const vaultId = options.vault || await vaultManager.getActiveVault();
   const session = await getVaultSession(vaultId);
 
+  // Try BW if session exists
+  let bwError: Error | null = null;
+  if (session) {
+    try {
+      const item = await getItemByName(session, resolvedItem);
+
+      return buildFieldsObject(item);
+    } catch (error) {
+      if (error instanceof SecretError) throw error;
+
+      // Store error for snapshot fallback
+      bwError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  // No session OR BW failed - try snapshot fallback
+  const snapshotItem = await snapshotManager.getItem(resolvedItem);
+  if (snapshotItem) {
+    try {
+      // Log warning about snapshot source
+      const meta = await snapshotManager.getMetadata();
+      if (meta) {
+        const ageMs = Date.now() - new Date(meta.createdAt).getTime();
+        if (ageMs > Constants.SNAPSHOT_STALE_AGE_MS) {
+          console.error(`[snapshot] WARNING: serving stale data for "${itemName}" (age: ${Math.round(ageMs / 60000)}min)`);
+        } else if (ageMs > Constants.SNAPSHOT_WARN_AGE_MS) {
+          console.error(`[snapshot] INFO: serving from snapshot for "${itemName}" (age: ${Math.round(ageMs / 60000)}min)`);
+        }
+      }
+
+      return buildFieldsObject(snapshotItem);
+    } catch (snapshotError) {
+      // Fall through to throw error
+    }
+  }
+
+  // Both BW and snapshot failed - throw appropriate error
   if (!session) {
     throw new SecretError(
       `No session for vault: ${vaultId}. Run: bw unlock`,
@@ -289,54 +456,27 @@ export async function getSecretObject(
     );
   }
 
-  try {
-    const result = await $`BW_SESSION=${session} bw get item ${resolvedItem}`.quiet();
-    const item = JSON.parse(result.stdout.toString());
-
-    const obj: Record<string, string> = {};
-
-    // Add login fields
-    if (item.login) {
-      if (item.login.username) obj.username = item.login.username;
-      if (item.login.password) obj.password = item.login.password;
-      if (item.login.uris?.[0]?.uri) obj.uri = item.login.uris[0].uri;
-    }
-
-    // Add notes
-    if (item.notes) obj.notes = item.notes;
-
-    // Add custom fields
-    if (item.fields) {
-      for (const field of item.fields) {
-        obj[field.name] = field.value;
-      }
-    }
-
-    return obj;
-  } catch (error) {
-    if (error instanceof SecretError) throw error;
-
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('vault is locked')) {
-      throw new SecretError(
-        `Vault is locked: ${vaultId}. Run: bw unlock`,
-        ErrorCode.VAULT_LOCKED
-      );
-    }
-    if (message.includes('not found')) {
-      throw new SecretError(
-        `Item not found: ${itemName}`,
-        ErrorCode.SECRET_NOT_FOUND
-      );
-    }
-
+  // Had session but BW failed
+  const message = bwError ? bwError.message : '';
+  if (message.includes('vault is locked')) {
     throw new SecretError(
-      `Failed to get item: ${itemName}`,
-      ErrorCode.VAULT_CORRUPTED,
-      true,
-      error instanceof Error ? error : undefined
+      `Vault is locked: ${vaultId}. Run: bw unlock`,
+      ErrorCode.VAULT_LOCKED
     );
   }
+  if (message.includes('not found')) {
+    throw new SecretError(
+      `Item not found: ${itemName}`,
+      ErrorCode.SECRET_NOT_FOUND
+    );
+  }
+
+  throw new SecretError(
+    `Failed to get item: ${itemName}`,
+    ErrorCode.VAULT_CORRUPTED,
+    true,
+    bwError || undefined
+  );
 }
 
 /**
@@ -364,18 +504,35 @@ export async function listSecrets(
   const vaultId = options.vault || await vaultManager.getActiveVault();
   const session = await getVaultSession(vaultId);
 
-  if (!session) {
-    throw new SecretError(
-      `No session for vault: ${vaultId}. Run: bw unlock`,
-      ErrorCode.VAULT_LOCKED
-    );
+  // Try BW if session exists
+  let bwError: Error | null = null;
+  if (session) {
+    try {
+      const result = await $`BW_SESSION=${session} bw list items`.quiet();
+      const items = JSON.parse(result.stdout.toString());
+
+      let names = items.map((item: any) => item.name);
+
+      // Apply filter if provided
+      if (filter) {
+        const lowerFilter = filter.toLowerCase();
+        names = names.filter((name: string) =>
+          name.toLowerCase().includes(lowerFilter)
+        );
+      }
+
+      return names.sort();
+    } catch (error) {
+      if (error instanceof SecretError) throw error;
+
+      // Store error for snapshot fallback
+      bwError = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
+  // No session OR BW failed - try snapshot fallback
   try {
-    const result = await $`BW_SESSION=${session} bw list items`.quiet();
-    const items = JSON.parse(result.stdout.toString());
-
-    let names = items.map((item: any) => item.name);
+    let names = await snapshotManager.listItems();
 
     // Apply filter if provided
     if (filter) {
@@ -385,25 +542,45 @@ export async function listSecrets(
       );
     }
 
-    return names.sort();
-  } catch (error) {
-    if (error instanceof SecretError) throw error;
-
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('vault is locked')) {
-      throw new SecretError(
-        `Vault is locked: ${vaultId}. Run: bw unlock`,
-        ErrorCode.VAULT_LOCKED
-      );
+    // Log warning about snapshot source
+    const meta = await snapshotManager.getMetadata();
+    if (meta) {
+      const ageMs = Date.now() - new Date(meta.createdAt).getTime();
+      if (ageMs > Constants.SNAPSHOT_STALE_AGE_MS) {
+        console.error(`[snapshot] WARNING: serving stale list (age: ${Math.round(ageMs / 60000)}min)`);
+      } else if (ageMs > Constants.SNAPSHOT_WARN_AGE_MS) {
+        console.error(`[snapshot] INFO: serving list from snapshot (age: ${Math.round(ageMs / 60000)}min)`);
+      }
     }
 
+    return names.sort();
+  } catch (snapshotError) {
+    // Fall through to throw error
+  }
+
+  // Both BW and snapshot failed - throw appropriate error
+  if (!session) {
     throw new SecretError(
-      `Failed to list secrets`,
-      ErrorCode.VAULT_CORRUPTED,
-      true,
-      error instanceof Error ? error : undefined
+      `No session for vault: ${vaultId}. Run: bw unlock`,
+      ErrorCode.VAULT_LOCKED
     );
   }
+
+  // Had session but BW failed
+  const message = bwError ? bwError.message : '';
+  if (message.includes('vault is locked')) {
+    throw new SecretError(
+      `Vault is locked: ${vaultId}. Run: bw unlock`,
+      ErrorCode.VAULT_LOCKED
+    );
+  }
+
+  throw new SecretError(
+    `Failed to list secrets`,
+    ErrorCode.VAULT_CORRUPTED,
+    true,
+    bwError || undefined
+  );
 }
 
 /**

@@ -1,7 +1,12 @@
 /**
- * macOS Keychain integration for secure storage
+ * Secure credential storage with cross-platform support
  *
- * Provides a type-safe interface to macOS Keychain using the `security` CLI.
+ * Provides storage for encryption keys and session tokens:
+ * - macOS: Uses Keychain via `security` CLI
+ * - Linux: Falls back to file-based storage via env vars:
+ *   - BW_SESSION / BW_SESSION_FILE: Vault session tokens
+ *   - MASTER_KEY_FILE: Master encryption key persistence
+ *
  * Stores:
  * 1. Master encryption key for vault encryption (AES-256)
  * 2. BW_SESSION tokens per vault for Bitwarden CLI
@@ -148,6 +153,8 @@ export async function keychainDelete(
  * Master key is used to encrypt/decrypt vault files using AES-256-GCM.
  * If not found in Keychain, generates a new 32-byte (256-bit) random key.
  *
+ * On Linux (no Keychain), set MASTER_KEY_FILE env var to persist the key.
+ *
  * @returns Master key as Buffer (32 bytes)
  * @throws {SecretError} If keychain operations fail
  *
@@ -158,20 +165,45 @@ export async function keychainDelete(
 export async function getMasterKey(): Promise<Buffer> {
   const account = 'master-key';
 
-  // Try to get existing key from Keychain
-  const existingKey = await keychainGet(account);
-  if (existingKey) {
-    // Stored as hex string, convert back to Buffer
-    return Buffer.from(existingKey, 'hex');
+  // Check MASTER_KEY_FILE env var for Linux/non-Keychain environments
+  const keyFile = process.env.MASTER_KEY_FILE;
+  if (keyFile) {
+    try {
+      const existing = await Bun.file(keyFile).text();
+      if (existing.trim()) return Buffer.from(existing.trim(), 'hex');
+    } catch {
+      // File doesn't exist yet - generate below
+    }
+  }
+
+  // Try macOS Keychain
+  try {
+    const existingKey = await keychainGet(account);
+    if (existingKey) {
+      return Buffer.from(existingKey, 'hex');
+    }
+  } catch {
+    // Not on macOS or Keychain unavailable
   }
 
   // Generate new 32-byte (256-bit) random key for AES-256
   const newKey = Buffer.allocUnsafe(32);
   crypto.getRandomValues(newKey);
-
-  // Store in Keychain as hex string for safe storage
   const keyHex = newKey.toString('hex');
-  await keychainSet(account, keyHex);
+
+  // Store in file if MASTER_KEY_FILE is set
+  if (keyFile) {
+    await Bun.write(keyFile, keyHex);
+  }
+
+  // Try Keychain storage (macOS)
+  try {
+    await keychainSet(account, keyHex);
+  } catch {
+    if (!keyFile) {
+      console.warn('Warning: Master key generated but no persistent storage available. Set MASTER_KEY_FILE on Linux.');
+    }
+  }
 
   return newKey;
 }
@@ -179,11 +211,13 @@ export async function getMasterKey(): Promise<Buffer> {
 /**
  * Get BW session token for a vault
  *
- * Retrieves the BW_SESSION environment variable value for Bitwarden CLI.
+ * Retrieves the BW_SESSION token with fallback chain:
+ * 1. BW_SESSION env var (highest priority - set by systemd or user)
+ * 2. BW_SESSION_FILE env var (file written by systemd ExecStartPre)
+ * 3. macOS Keychain (will fail gracefully on Linux)
  *
  * @param vaultId - Vault identifier (e.g., 'default', 'work')
  * @returns Session token, or null if not found
- * @throws {SecretError} If keychain operations fail
  *
  * @example
  * const session = await getVaultSession('work');
@@ -194,24 +228,64 @@ export async function getMasterKey(): Promise<Buffer> {
  * }
  */
 export async function getVaultSession(vaultId: string): Promise<string | null> {
-  return keychainGet(`session-${vaultId}`);
+  // 1. Check BW_SESSION env var (highest priority - set by systemd or user)
+  const envSession = process.env.BW_SESSION;
+  if (envSession) return envSession;
+
+  // 2. Check BW_SESSION_FILE env var (file written by systemd ExecStartPre)
+  const sessionFile = process.env.BW_SESSION_FILE;
+  if (sessionFile) {
+    try {
+      const content = await Bun.file(sessionFile).text();
+      const trimmed = content.trim();
+      if (trimmed) return trimmed;
+    } catch {
+      // File doesn't exist or can't be read - fall through
+    }
+  }
+
+  // 3. Fall back to macOS Keychain (will fail gracefully on Linux)
+  try {
+    return await keychainGet(`session-${vaultId}`);
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Store BW session token for a vault
  *
- * Saves the BW_SESSION token to Keychain for later retrieval.
+ * Saves the BW_SESSION token with dual storage:
+ * - If BW_SESSION_FILE is set, writes to file (for Linux/systemd)
+ * - Tries macOS Keychain (fails silently on Linux if file fallback available)
  *
  * @param vaultId - Vault identifier (e.g., 'default', 'work')
  * @param token - BW_SESSION token from `bw unlock`
- * @throws {SecretError} If keychain operations fail
+ * @throws {SecretError} If no storage backend is available
  *
  * @example
  * const session = await unlockVault('work');
  * await setVaultSession('work', session);
  */
 export async function setVaultSession(vaultId: string, token: string): Promise<void> {
-  await keychainSet(`session-${vaultId}`, token);
+  // If BW_SESSION_FILE is set, also write there (for Linux/systemd)
+  const sessionFile = process.env.BW_SESSION_FILE;
+  if (sessionFile) {
+    await Bun.write(sessionFile, token);
+  }
+
+  // Try Keychain (will fail silently on Linux)
+  try {
+    await keychainSet(`session-${vaultId}`, token);
+  } catch {
+    // On Linux, Keychain isn't available - file fallback is sufficient
+    if (!sessionFile) {
+      throw new SecretError(
+        'No session storage available. Set BW_SESSION_FILE env var on Linux.',
+        ErrorCode.KEYCHAIN_COMMAND_FAILED
+      );
+    }
+  }
 }
 
 /**

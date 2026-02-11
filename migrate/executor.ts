@@ -7,6 +7,7 @@ import * as readline from 'readline';
 import { MigrationPlan, PlannedSecret, SecretAlias } from './types';
 import { vaultManager } from '../vault-config';
 import { getVaultSession } from '../keychain';
+import { getItemByName } from '../index';
 import { recordMigration } from './manifest';
 
 // Colors
@@ -299,7 +300,7 @@ export async function verifySecrets(
     process.stdout.write(`  ${itemName}... `);
 
     try {
-      await $`BW_SESSION=${session} bw get item ${itemName}`.quiet();
+      await getItemByName(session, itemName);
       console.log(green('✓'));
       verified++;
     } catch {

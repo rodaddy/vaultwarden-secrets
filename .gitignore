@@ -22,6 +22,17 @@ Thumbs.db
 coverage/
 .nyc_output/
 
-# Cache (never commit secrets!)
+# Secrets & credentials (NEVER commit!)
+.env
+.env.*
+.master-key
 .vw-cache.json
 .bw_session*
+snapshot.enc
+
+# Working files (implementation notes, session context)
+.working/
+.reports/
+.server.log
+.server.pid
+deploy/tls/
