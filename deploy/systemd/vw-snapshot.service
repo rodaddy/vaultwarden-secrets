@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-User=vw-secrets
+User=root
 WorkingDirectory=/opt/vaultwarden-secrets
 Environment="SECURITY_PROFILE=im-aware"
-ExecStart=/usr/local/bin/bun run cli.ts snapshot
+ExecStart=/root/.bun/bin/bun run cli.ts snapshot

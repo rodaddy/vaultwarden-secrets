@@ -34,6 +34,12 @@ export interface SecurityProfile {
   secretsEncrypted?: boolean;
   monitoring?: MonitoringConfig;
   warning?: string;
+  /** Allow create/update/delete operations via MCP */
+  allowWrites?: boolean;
+  /** Require confirmation (destructiveHint) for update/delete operations */
+  writeConfirmation?: boolean;
+  /** Restrict MCP access to items in these VW folders (empty = unrestricted) */
+  folderScope?: string[];
 }
 
 export const SecurityProfiles = {
@@ -46,6 +52,9 @@ export const SecurityProfiles = {
     audit: 'basic',
     rateLimit: false,
     clientAuth: 'none',
+    allowWrites: true,
+    writeConfirmation: false,
+    folderScope: [],
     warning: '⚠️  NEVER USE IN PRODUCTION - NO SECURITY ⚠️',
   },
 
@@ -61,6 +70,9 @@ export const SecurityProfiles = {
       window: '1m',
     },
     clientAuth: 'api-key',
+    allowWrites: true,
+    writeConfirmation: true,
+    folderScope: ['Infrastructure'],
   },
 
   'im-a-dev': {
@@ -77,6 +89,9 @@ export const SecurityProfiles = {
     clientAuth: 'oauth2',
     tokenExpiry: 900, // 15 minutes
     refreshTokens: true,
+    allowWrites: true,
+    writeConfirmation: true,
+    folderScope: ['Infrastructure'],
   },
 
   'trust-no-one': {
@@ -101,6 +116,9 @@ export const SecurityProfiles = {
       anomalyDetection: true,
       failedAuthThreshold: 3,
     },
+    allowWrites: false,
+    writeConfirmation: true,
+    folderScope: [],
   },
 } as const satisfies Record<string, SecurityProfile>;
 
