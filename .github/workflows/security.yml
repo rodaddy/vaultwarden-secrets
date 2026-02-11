@@ -16,8 +16,6 @@ jobs:
           fetch-depth: 0
 
       - uses: GitGuardian/ggshield-action@v1
-        with:
-          args: secret scan ci
         env:
           GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
           GITHUB_PUSH_BASE_SHA: ${{ github.event.base_ref }}
