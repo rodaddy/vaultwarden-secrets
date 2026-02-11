@@ -485,21 +485,23 @@ async function createInitializedTransport(requestUrl: string): Promise<WebStanda
   await mcpServer.connect(transport);
 
   // Synthesize initialize handshake so the server is ready for tool calls
+  const initBody = {
+    jsonrpc: '2.0', id: '_auto_init', method: 'initialize',
+    params: {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'auto-reconnect', version: '1.0' },
+    },
+  };
   const initReq = new Request(requestUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: '_auto_init', method: 'initialize',
-      params: {
-        protocolVersion: '2025-03-26',
-        capabilities: {},
-        clientInfo: { name: 'auto-reconnect', version: '1.0' },
-      },
-    }),
+    body: JSON.stringify(initBody),
   });
-  await transport.handleRequest(initReq);
+  await transport.handleRequest(initReq, { parsedBody: initBody });
 
   // Complete handshake with initialized notification
+  const notifBody = { jsonrpc: '2.0', method: 'notifications/initialized' };
   const notifReq = new Request(requestUrl, {
     method: 'POST',
     headers: {
@@ -507,11 +509,9 @@ async function createInitializedTransport(requestUrl: string): Promise<WebStanda
       'Accept': 'application/json',
       'mcp-session-id': transport.sessionId!,
     },
-    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    body: JSON.stringify(notifBody),
   });
-  await transport.handleRequest(notifReq, {
-    parsedBody: { jsonrpc: '2.0', method: 'notifications/initialized' },
-  });
+  await transport.handleRequest(notifReq, { parsedBody: notifBody });
 
   if (transport.sessionId) {
     transports.set(transport.sessionId, transport);
