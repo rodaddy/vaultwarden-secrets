@@ -39,7 +39,8 @@
     "install-pai": "./install.sh --pai",
     "uninstall": "./install.sh --uninstall",
     "set-session": "bun run cli.ts set-session",
-    "get": "bun run cli.ts get"
+    "get": "bun run cli.ts get",
+    "cred-proxy": "bun run server/cred-proxy.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
