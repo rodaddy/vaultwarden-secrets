@@ -14,8 +14,8 @@
  *
  * Tools (write — gated by SecurityProfile.allowWrites):
  * - refresh_snapshot: Force snapshot refresh from vault
- * - create_secret: Create a new secret (scoped to allowed folders)
- * - update_secret: Update an existing secret (destructiveHint)
+ * - create_secret: Create a new secret with optional type + custom fields
+ * - update_secret: Update an existing secret with custom field merge/replace
  * - delete_secret: Delete a secret (destructiveHint)
  *
  * @module server/mcp
@@ -33,6 +33,7 @@ import { getVaultSession } from '../keychain';
 import { loadBearerTokens } from './middleware/bearer-auth';
 import { getProfile } from './profiles';
 import { resolveService } from './service-resolver';
+import { buildCreateTemplate, mergeUpdateFields, bwCreateItem, bwGetItem, bwEditItem, bwDeleteItem } from './vault-client';
 
 // ============================================================================
 // Auth helper
@@ -318,40 +319,31 @@ function createMcpServer(): McpServer {
 
     server.tool(
       'create_secret',
-      'Create a new secret in the vault (Infrastructure folder). Triggers snapshot refresh after creation.',
+      'Create a new secret in the vault (Infrastructure folder). Supports login items (type 1) and secure notes (type 2) with custom fields. Triggers snapshot refresh after creation.',
       {
         name: z.string().describe('Name for the new secret'),
-        username: z.string().optional().describe('Login username'),
-        password: z.string().optional().describe('Login password'),
-        uri: z.string().optional().describe('Login URI (e.g. https://example.com)'),
+        type: z.number().optional().describe('Item type: 1=login (default), 2=secure note. Use type 2 with custom fields for API tokens.'),
+        username: z.string().optional().describe('Login username (type 1 only)'),
+        password: z.string().optional().describe('Login password (type 1 only)'),
+        uri: z.string().optional().describe('Login URI (type 1 only, e.g. https://example.com)'),
         notes: z.string().optional().describe('Notes field'),
+        fields: z.array(z.object({
+          name: z.string().describe('Field name'),
+          value: z.string().describe('Field value'),
+          type: z.number().optional().describe('Field type: 0=text (default), 1=hidden'),
+        })).optional().describe('Custom fields (e.g. API tokens on secure notes)'),
       },
       { destructiveHint: false, idempotentHint: false },
-      async ({ name, username, password, uri, notes }) => {
+      async ({ name, type, username, password, uri, notes, fields }) => {
         try {
           if (!writeFolderId) return err('Error: No write folder configured. Check folderScope in security profile.');
 
           const session = await getVaultSession('default');
           if (!session) return err('Error: No vault session available. Run: bw unlock');
 
-          // Build BW item template
-          const item: Record<string, unknown> = {
-            type: 1, // login
-            name,
-            folderId: writeFolderId,
-            login: {
-              username: username || null,
-              password: password || null,
-              uris: uri ? [{ match: null, uri }] : [],
-            },
-            notes: notes || null,
-          };
+          const template = buildCreateTemplate({ name, type, folderId: writeFolderId, username, password, uri, notes, fields });
+          const created = await bwCreateItem(session, template);
 
-          const encoded = Buffer.from(JSON.stringify(item)).toString('base64');
-          const result = await $`BW_SESSION=${session} bw create item ${encoded}`.quiet();
-          const created = JSON.parse(result.text());
-
-          // Refresh snapshot to include the new item
           await snapshotManager.createSnapshot('default', session);
 
           return json({ created: true, id: created.id, name: created.name });
@@ -363,16 +355,22 @@ function createMcpServer(): McpServer {
 
     server.tool(
       'update_secret',
-      'Update an existing secret. Only secrets in allowed folders can be modified. Triggers snapshot refresh.',
+      'Update an existing secret. Supports login fields and custom fields. Only secrets in allowed folders can be modified. Triggers snapshot refresh.',
       {
         name: z.string().describe('Name of the secret to update'),
         username: z.string().optional().describe('New username (omit to keep current)'),
         password: z.string().optional().describe('New password (omit to keep current)'),
         uri: z.string().optional().describe('New URI (omit to keep current)'),
         notes: z.string().optional().describe('New notes (omit to keep current)'),
+        fields: z.array(z.object({
+          name: z.string().describe('Field name'),
+          value: z.string().describe('Field value'),
+          type: z.number().optional().describe('Field type: 0=text (default), 1=hidden'),
+        })).optional().describe('Custom fields to add/update'),
+        fieldStrategy: z.enum(['merge', 'replace']).optional().describe("'merge' (default): update existing fields by name, append new. 'replace': overwrite all fields."),
       },
       { destructiveHint: true, idempotentHint: true },
-      async ({ name, username, password, uri, notes }) => {
+      async ({ name, username, password, uri, notes, fields, fieldStrategy }) => {
         try {
           const session = await getVaultSession('default');
           if (!session) return err('Error: No vault session available. Run: bw unlock');
@@ -380,25 +378,10 @@ function createMcpServer(): McpServer {
           const item = await findScopedItem(name);
           if (!item) return err(`Error: Secret "${name}" not found or not in allowed folder scope`);
 
-          // Fetch the full item from BW CLI (snapshot may be slightly stale)
-          const getResult = await $`BW_SESSION=${session} bw get item ${item.id}`.quiet();
-          const fullItem = JSON.parse(getResult.text());
+          const fullItem = await bwGetItem(session, item.id);
+          const merged = mergeUpdateFields(fullItem, { username, password, uri, notes, fields, fieldStrategy });
+          await bwEditItem(session, item.id, merged);
 
-          // Merge updates
-          if (username !== undefined) fullItem.login = { ...fullItem.login, username };
-          if (password !== undefined) fullItem.login = { ...fullItem.login, password };
-          if (uri !== undefined) {
-            fullItem.login = {
-              ...fullItem.login,
-              uris: [{ match: null, uri }],
-            };
-          }
-          if (notes !== undefined) fullItem.notes = notes;
-
-          const encoded = Buffer.from(JSON.stringify(fullItem)).toString('base64');
-          await $`BW_SESSION=${session} bw edit item ${item.id} ${encoded}`.quiet();
-
-          // Refresh snapshot
           await snapshotManager.createSnapshot('default', session);
 
           return json({ updated: true, id: item.id, name: item.name });
@@ -423,9 +406,8 @@ function createMcpServer(): McpServer {
           const item = await findScopedItem(name);
           if (!item) return err(`Error: Secret "${name}" not found or not in allowed folder scope`);
 
-          await $`BW_SESSION=${session} bw delete item ${item.id}`.quiet();
+          await bwDeleteItem(session, item.id);
 
-          // Refresh snapshot
           await snapshotManager.createSnapshot('default', session);
 
           return json({ deleted: true, id: item.id, name: item.name });
