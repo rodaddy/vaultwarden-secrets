@@ -10,6 +10,7 @@
  * - get_secret_fields: Get all fields for a secret item
  * - list_secrets: List available secrets with optional filter
  * - snapshot_info: Get vault snapshot metadata (age, item count, staleness)
+ * - get_service: Get all vault items for a multi-host service
  *
  * Tools (write — gated by SecurityProfile.allowWrites):
  * - refresh_snapshot: Force snapshot refresh from vault
@@ -31,6 +32,7 @@ import { snapshotManager, type BitwVaultItem } from '../snapshot';
 import { getVaultSession } from '../keychain';
 import { loadBearerTokens } from './middleware/bearer-auth';
 import { getProfile } from './profiles';
+import { resolveService } from './service-resolver';
 
 // ============================================================================
 // Auth helper
@@ -139,7 +141,7 @@ const err = (msg: string) => ({ content: [{ type: 'text' as const, text: msg }],
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: 'vaultwarden-secrets',
-    version: '0.6.0',
+    version: '0.7.0',
   });
 
   // ------------------------------------------------------------------
@@ -259,6 +261,32 @@ function createMcpServer(): McpServer {
         const metadata = await snapshotManager.getMetadata();
         if (!metadata) return text('No snapshot exists');
         return json(metadata);
+      } catch (error) {
+        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+
+  server.tool(
+    'get_service',
+    'Get all vault items for a service (API credentials + per-host entries). Uses naming convention: SERVICE_API for shared credentials, service01/02/etc for hosts.',
+    {
+      service: z.string().describe('Service name prefix (e.g. "proxmox", "redis", "github")'),
+    },
+    { readOnlyHint: true },
+    async ({ service }) => {
+      try {
+        const snapshot = await snapshotManager.load();
+        if (!snapshot) return err('Error: No snapshot available. Run refresh_snapshot first.');
+
+        const allowedItems = snapshot.items.filter(isItemAllowed);
+        const result = resolveService(service, allowedItems);
+
+        if (result.itemCount === 0) {
+          return err(`No items found for service "${service}". Check the service name or folder scope.`);
+        }
+
+        return json(result);
       } catch (error) {
         return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -413,7 +441,7 @@ function createMcpServer(): McpServer {
   // ------------------------------------------------------------------
 
   const toolList = [
-    'search_secrets', 'get_secret', 'get_secret_fields', 'list_secrets', 'snapshot_info',
+    'search_secrets', 'get_secret', 'get_secret_fields', 'list_secrets', 'snapshot_info', 'get_service',
     ...(profile.allowWrites ? ['refresh_snapshot', 'create_secret', 'update_secret', 'delete_secret'] : []),
   ];
 
@@ -427,7 +455,7 @@ function createMcpServer(): McpServer {
           mimeType: 'application/json',
           text: JSON.stringify({
             name: 'vaultwarden-secrets',
-            version: '0.6.0',
+            version: '0.7.0',
             profile: profile.name,
             folderScope: profile.folderScope || [],
             allowWrites: profile.allowWrites || false,
@@ -519,7 +547,7 @@ const host = process.env.MCP_HOST || '0.0.0.0';
 
 console.log('');
 console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-console.log(`MCP Server: vaultwarden-secrets v0.6.0`);
+console.log(`MCP Server: vaultwarden-secrets v0.7.0`);
 console.log(`Transport:  Streamable HTTP`);
 console.log(`Endpoint:   http://${host}:${port}/mcp`);
 console.log(`Auth:       Bearer token (${tokens.size} client(s))`);

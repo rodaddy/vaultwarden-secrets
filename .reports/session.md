@@ -1,36 +1,44 @@
 # Session Summary
 
-**Date:** 2026-02-08
+**Date:** 2026-02-11
 **Project:** vaultwarden-secrets
 
 ## What Got Done
-- Fixed BW CLI multi-result ambiguity bug: `secret get "LiteLLM"` now works when "LiteLLM API Key" also exists
-- Created `getItemByName()` helper in `index.ts` — fast path + fallback to `bw list items --search` with exact name filter
-- Replaced all 6 raw `bw get item` call sites across 3 files
-- Fixed `secret unlock --save` biometric store (was silently failing — missing newline in stdin pipe)
-- Replaced broken Swift biometric-auth binary with macOS `security` CLI Keychain approach
-- `secret unlock --save` now stores master password in login Keychain; `secret unlock` auto-retrieves it
-- Added Paperless-NGX + AI idea to `.claude_ideas/active/`
-- Verified: 184 tests pass, zero type errors
+- Diagnosed and fixed stale snapshot issue — other CC sessions couldn't find new Proxmox cluster secrets
+- Fixed systemd `vw-snapshot.timer` on LXC 214: wrong user (`vw-secrets` doesn't exist → `root`) and wrong bun path (`/usr/local/bin/bun` → `/root/.bun/bin/bun`). Timer now fires every 15 min successfully.
+- Extended `SecurityProfile` with `allowWrites`, `writeConfirmation`, `folderScope` fields
+- Added 4 new MCP tools: `refresh_snapshot`, `create_secret`, `update_secret`, `delete_secret`
+- Added profile-driven folder scoping to ALL MCP tools (read + write). `im-aware` profile restricts to Infrastructure folder.
+- Added `ToolAnnotations` (`destructiveHint`, `readOnlyHint`) to all MCP tools
+- Created PAI skill (`~/.config/pai/Skills/vaultwarden-secrets/SKILL.md`) for cross-session discoverability
+- Scrubbed git history with BFG — removed fake test passwords that ggshield flagged
+- Hardened `.gitignore` — added `.env`, `.master-key`, `snapshot.enc`
+- Set up global ggshield protection: pre-commit + pre-push hooks in `~/.config/git/hooks/` for ALL repos
+- Created GitHub Actions CI workflow for server-side secret scanning
+- Updated server `.env` on LXC 214 with `SECURITY_PROFILE=im-aware` and `API_FOLDERS_CLAUDE=Infrastructure`
+- Bumped version to `0.6.0`
 
 ## Key Decisions
-- **`getItemByName()` single helper:** All 6 BW item lookup call sites funnel through one function
-- **Keychain over biometric binary:** Swift binary with `SecItemAdd` + biometric flags gets SIGKILL'd on macOS Sequoia without real Apple Developer signing. Switched to `security` CLI which is Apple-signed. Trade-off: no Touch ID prompt, but Keychain is Mac-password-protected.
-- **Server gets fix for free:** Routes call `getSecret()`/`getSecretObject()` which now use `getItemByName()` internally
+- **Profile-driven scoping over env vars:** `SecurityProfile.folderScope` is the single source of truth for MCP access control, replacing scattered `API_FOLDERS_*` env vars
+- **Infrastructure folder only:** All MCP reads and writes scoped to Infrastructure folder. New secrets auto-placed there.
+- **Destructive hints for write ops:** `update_secret` and `delete_secret` use MCP `destructiveHint: true`; `create_secret` does not
+- **BFG for history rewrite:** Force-pushed feature branch to scrub test fixture passwords from git history. Necessary for going public.
+- **Global ggshield:** Added to `~/.config/git/hooks/` (via `core.hooksPath`) so every repo on the machine is protected
 
 ## Files Changed
-- `index.ts` — Added exported `getItemByName()` helper
-- `bin/secret` — Imported `getItemByName`; replaced 3 raw `bw get item` calls; replaced biometric-auth with `security` CLI Keychain helpers; added error reporting for biometric save failures
-- `migrate/executor.ts` — Imported `getItemByName`; replaced `bw get item` in `verifySecrets()`
-- `.claude_ideas/active/paperless-ngx-ai.md` — NEW: Paperless-NGX with AI idea
-
-## Blockers/Issues
-- Touch ID / Apple Watch auth requires a real Apple Developer signing identity (not ad-hoc). Certificate was created in Xcode but `security find-identity` shows 0 valid identities — may need provisioning profile or Xcode project to fully activate.
-- Master password was shared in conversation — needs rotation.
+- `server/profiles.ts` — Added `allowWrites`, `writeConfirmation`, `folderScope` to SecurityProfile interface + all 4 profiles
+- `server/mcp.ts` — Major rewrite: profile-based folder scoping, 4 new write tools, tool annotations, version 0.6.0
+- `deploy/systemd/vw-snapshot.service` — Fixed User=root, correct bun path
+- `snapshot.test.ts` — Replaced realistic test passwords with `FAKE_TEST_VALUE`
+- `.gitignore` — Added `.env`, `.master-key`, `snapshot.enc`
+- `.github/workflows/security.yml` — NEW: GitGuardian CI scanning
+- `~/.config/git/hooks/pre-commit` — Added ggshield scanning (global)
+- `~/.config/git/hooks/pre-push` — NEW: ggshield pre-push scanning (global)
+- `~/.config/pai/Skills/vaultwarden-secrets/SKILL.md` — NEW: PAI skill for cross-session usage
 
 ## Next Session
-- **Change master password** (was exposed in chat)
-- Redeploy server to LXC 214 (picks up multi-result fix + keychain unlock)
-- Wire vaultwarden-secrets as MCP server into LiteLLM gateway
-- Revisit Touch ID signing once Xcode identity is sorted
-- Test end-to-end: `secret get "LiteLLM"` on live vault
+- **Deploy to LXC 214** — git clone from GitHub, backup current setup, test, swap
+- **MCP write operations:** Not yet tested end-to-end on the server (needs deploy first)
+- **GitHub secret scanning:** Will auto-enable when repo goes public
+- **Secure Notes support** in `secret` CLI (existing idea)
+- **LiteLLM integration** — register MCP through LiteLLM gateway
