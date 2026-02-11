@@ -464,6 +464,62 @@ app.get('/health', (c) =>
 
 const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
 
+/**
+ * Create a new MCP transport + server, run the initialize handshake internally,
+ * and store in the transports map. Used for both explicit init requests and
+ * auto-reconnection when a client sends a stale session ID.
+ */
+async function createInitializedTransport(requestUrl: string): Promise<WebStandardStreamableHTTPServerTransport> {
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: () => crypto.randomUUID(),
+    enableJsonResponse: true,
+  });
+
+  transport.onclose = () => {
+    if (transport.sessionId) {
+      transports.delete(transport.sessionId);
+    }
+  };
+
+  const mcpServer = createMcpServer();
+  await mcpServer.connect(transport);
+
+  // Synthesize initialize handshake so the server is ready for tool calls
+  const initReq = new Request(requestUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: '_auto_init', method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'auto-reconnect', version: '1.0' },
+      },
+    }),
+  });
+  await transport.handleRequest(initReq);
+
+  // Complete handshake with initialized notification
+  const notifReq = new Request(requestUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'mcp-session-id': transport.sessionId!,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  });
+  await transport.handleRequest(notifReq, {
+    parsedBody: { jsonrpc: '2.0', method: 'notifications/initialized' },
+  });
+
+  if (transport.sessionId) {
+    transports.set(transport.sessionId, transport);
+  }
+
+  return transport;
+}
+
 app.all('/mcp', async (c) => {
   const clientId = authenticateRequest(c.req.raw);
   if (!clientId) {
@@ -481,37 +537,35 @@ app.all('/mcp', async (c) => {
     const isInit = !Array.isArray(body) && (body as any)?.method === 'initialize';
 
     if (isInit) {
+      // Explicit init: create fresh transport and let the client's request do the handshake
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         enableJsonResponse: true,
       });
-
       transport.onclose = () => {
-        if (transport.sessionId) {
-          transports.delete(transport.sessionId);
-        }
+        if (transport.sessionId) transports.delete(transport.sessionId);
       };
-
       const mcpServer = createMcpServer();
       await mcpServer.connect(transport);
 
       const response = await transport.handleRequest(c.req.raw, { parsedBody: body });
-
-      if (transport.sessionId) {
-        transports.set(transport.sessionId, transport);
-      }
-
+      if (transport.sessionId) transports.set(transport.sessionId, transport);
       return response;
     }
 
+    // Look up existing session, or auto-reconnect if stale/missing
     const sessionId = c.req.header('mcp-session-id');
-    if (!sessionId || !transports.has(sessionId)) {
-      return c.json({ error: 'Session not found. Re-initialize required.' }, 404);
+    let transport = sessionId ? transports.get(sessionId) : undefined;
+
+    if (!transport) {
+      console.log(`[MCP] Auto-reconnecting stale session ${sessionId ?? '(none)'}`);
+      transport = await createInitializedTransport(c.req.url);
     }
 
-    return transports.get(sessionId)!.handleRequest(c.req.raw, { parsedBody: body });
+    return transport.handleRequest(c.req.raw, { parsedBody: body });
   }
 
+  // GET/DELETE — SSE streaming, no auto-reconnect
   const sessionId = c.req.header('mcp-session-id');
   if (!sessionId || !transports.has(sessionId)) {
     return c.json({ error: 'Session not found. Re-initialize required.' }, 404);
