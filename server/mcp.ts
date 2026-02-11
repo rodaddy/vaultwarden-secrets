@@ -495,7 +495,7 @@ async function createInitializedTransport(requestUrl: string): Promise<WebStanda
   };
   const initReq = new Request(requestUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
     body: JSON.stringify(initBody),
   });
   await transport.handleRequest(initReq, { parsedBody: initBody });
@@ -506,7 +506,7 @@ async function createInitializedTransport(requestUrl: string): Promise<WebStanda
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
+      'Accept': 'application/json, text/event-stream',
       'mcp-session-id': transport.sessionId!,
     },
     body: JSON.stringify(notifBody),
@@ -560,6 +560,16 @@ app.all('/mcp', async (c) => {
     if (!transport) {
       console.log(`[MCP] Auto-reconnecting stale session ${sessionId ?? '(none)'}`);
       transport = await createInitializedTransport(c.req.url);
+
+      // Patch the request's session ID to match the new transport
+      const headers = new Headers(c.req.raw.headers);
+      headers.set('mcp-session-id', transport.sessionId!);
+      const patched = new Request(c.req.raw.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      return transport.handleRequest(patched, { parsedBody: body });
     }
 
     return transport.handleRequest(c.req.raw, { parsedBody: body });
