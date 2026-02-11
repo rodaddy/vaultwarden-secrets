@@ -506,7 +506,7 @@ app.all('/mcp', async (c) => {
 
     const sessionId = c.req.header('mcp-session-id');
     if (!sessionId || !transports.has(sessionId)) {
-      return c.json({ error: 'Invalid or missing session. Send initialize first.' }, 400);
+      return c.json({ error: 'Session not found. Re-initialize required.' }, 404);
     }
 
     return transports.get(sessionId)!.handleRequest(c.req.raw, { parsedBody: body });
@@ -514,7 +514,7 @@ app.all('/mcp', async (c) => {
 
   const sessionId = c.req.header('mcp-session-id');
   if (!sessionId || !transports.has(sessionId)) {
-    return c.json({ error: 'Invalid or missing session' }, 400);
+    return c.json({ error: 'Session not found. Re-initialize required.' }, 404);
   }
 
   return transports.get(sessionId)!.handleRequest(c.req.raw);
