@@ -27,6 +27,16 @@ echo "[deploy] Pulled $(git log --oneline -1)"
 # Install dependencies if lockfile changed
 bun install --frozen-lockfile 2>/dev/null || bun install
 
+# Sync systemd unit files if changed
+for unit in deploy/systemd/*.service; do
+  name=$(basename "$unit")
+  if ! cmp -s "$unit" "/etc/systemd/system/$name" 2>/dev/null; then
+    cp "$unit" "/etc/systemd/system/$name"
+    echo "[deploy] Updated $name"
+  fi
+done
+systemctl daemon-reload
+
 # Restart services
 systemctl restart vaultwarden-secrets.service
 systemctl restart vaultwarden-secrets-mcp.service

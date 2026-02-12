@@ -3,7 +3,7 @@
     "litellm": {
       "vaultItem": "LiteLLM API Key",
       "map": {
-        "OPENAI_API_KEY": "login.password",
+        "OPENAI_API_KEY": "field:API Key",
         "OPENAI_BASE_URL": "field:Base URL"
       }
     }
