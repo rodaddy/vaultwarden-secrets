@@ -1,5 +1,7 @@
 # vaultwarden-secrets
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/rodaddy)
+
 Secure secrets management library with Vaultwarden/Bitwarden CLI integration, encrypted caching, and macOS Keychain storage.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
