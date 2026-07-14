@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Status: PR #24 is in focused fix verification for issue #13; verifier follow-ups are in progress.
-- Current phase: the active MCP baseline is restored; #13 focused verification follow-ups and deterministic validation are in progress; the #23 compatibility baseline remains the next implementation issue.
+- Status: PR #24 is in the focused verification gate for issue #13; the terminal audit has not started.
+- Current phase: the active MCP baseline is restored; the #13 focused verification loop is active and the terminal audit awaits a clean verdict; the #23 compatibility baseline remains the next implementation issue.
 - Control plane: this packet plus umbrella issue #12; no repository Project board currently exists.
 - Scope: greenfield internal control plane with compatibility-preserving migration from the active MCP service, Vaultwarden payload custody, and an independent non-secret control plane.
 
@@ -53,4 +53,4 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 
 ## Handoff
 
-Next exact task: finish the focused-verifier follow-up, rerun deterministic gates and focused re-verification, then run the opposite-runtime terminal audit without disrupting the active MCP path. After merge authorization and closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
+Next exact task: complete the focused verification gate, then run the opposite-runtime terminal audit without disrupting the active MCP path. After merge authorization and closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
