@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Status: PR #24 is in the terminal-audit gate for issue #13; audit follow-up and targeted verification are active.
-- Current phase: the active MCP baseline is restored; the #13 terminal audit found a contained-service restart path that is being fixed and targeted-verified; the #23 compatibility baseline remains the next implementation issue.
+- Status: PR #24 has zero known review findings; the required GitGuardian Actions check is blocked by an invalid repository API key.
+- Current phase: the active MCP baseline is restored; #13 implementation and review gates are complete except for the external CI credential blocker; the #23 compatibility baseline remains the next implementation issue after an authorized merge.
 - Control plane: this packet plus umbrella issue #12; no repository Project board currently exists.
 - Scope: greenfield internal control plane with compatibility-preserving migration from the active MCP service, Vaultwarden payload custody, and an independent non-secret control plane.
 
@@ -44,14 +44,16 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 | 2026-07-14 | Issue #13 containment cleanup | Retired-trigger test: 2 passed; full suite: 191 passed, 18 skipped, 0 failed; typecheck, diff check, and focused retired-reference scan passed | Controller verified port 3002 closed while port 3001 and non-secret MCP probe remained healthy |
 | 2026-07-14 | PR #24 review-fix validation | Retired installed unit moved to a root-only backup and systemd reloaded; unit path absent/inactive; port 3001, MCP service, and required timers active/enabled; ports 3000, 3002, and 3003 closed; non-secret `snapshot_info` current; focused test 3 passed; full suite 192 passed, 18 skipped, 0 failed; typecheck, ShellCheck, shell syntax, and diff check passed | Initial findings fixed; first focused verification found daemon-reload ordering and phase-label follow-ups |
 | 2026-07-14 | PR #24 terminal audit | Claude Opus high audited the pinned whole-PR patch at `c7c4fa6` | No P0/P1 and no same-root recurrence; one P2 contained-service restart path plus two supporting P3 findings require a fix and targeted verification |
+| 2026-07-14 | PR #24 terminal follow-up | Commit `3a2b00b` removed the port-3000/3003 restart path, added containment regression coverage, and corrected deploy documentation; pinned delta SHA-256 `b607d870239fc6724a5b6b9bbadf288e6f9fb3adcf81739541ffc4a9cf5ef500` | Targeted Sol-low verifier CLEAN; 4 focused tests passed; no same-root recurrence; terminal findings resolved |
 
 ## Blockers and Risks
 
 - DAG: #13 is independent; the full downstream dependency graph is explicit in `TASKS.md`.
+- CI: GitHub `Secret Detection` fails before scanning because the configured GitGuardian API key is invalid; local Gitleaks and the separate GitGuardian integration check pass. Credential repair is outside this PR's code scope.
 - Runtime topology, control-plane persistence technology, and pilot workload remain implementation decisions within the acceptance boundaries.
 - The legacy code exposes multiple auth profiles and deployment paths; retaining parallel contracts would undermine the single identity/runtime design.
 - Preserved snapshot/data are recovery assets, not proof that coordinated restore works.
 
 ## Handoff
 
-Next exact task: finish the terminal-audit follow-up, rerun exact gates, and obtain a clean targeted verifier without disrupting the active MCP path. After merge authorization and closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
+Next exact task: repair or replace the invalid GitGuardian Actions credential, rerun the required check on the exact PR head, then make the deliberate merge decision. After authorized merge and #13 closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
