@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Status: PR #24 is in Full-tier review fixes for issue #13.
-- Current phase: the active MCP baseline is restored; #13 retirement fixes and verification are in progress; the #23 compatibility baseline remains the next implementation issue.
+- Status: PR #24 is in focused fix verification for issue #13; verifier follow-ups are in progress.
+- Current phase: the active MCP baseline is restored; #13 focused verification follow-ups and deterministic validation are in progress; the #23 compatibility baseline remains the next implementation issue.
 - Control plane: this packet plus umbrella issue #12; no repository Project board currently exists.
 - Scope: greenfield internal control plane with compatibility-preserving migration from the active MCP service, Vaultwarden payload custody, and an independent non-secret control plane.
 
@@ -42,7 +42,7 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 | 2026-07-14 | Initial live containment handoff | Four services and two timers inactive/disabled; ports 3000-3003 closed; SSH/node-exporter and snapshot preserved | Superseded after the active MCP dependency was discovered |
 | 2026-07-14 | MCP dependency correction and restoration | MCP service plus session/snapshot timers enabled and active; non-secret `snapshot_info` healthy and current | Active compatibility baseline restored; ports 3000, 3002, and 3003 remain closed |
 | 2026-07-14 | Issue #13 containment cleanup | Retired-trigger test: 2 passed; full suite: 191 passed, 18 skipped, 0 failed; typecheck, diff check, and focused retired-reference scan passed | Controller verified port 3002 closed while port 3001 and non-secret MCP probe remained healthy |
-| 2026-07-14 | PR #24 review-fix validation | Retired installed unit moved to a root-only backup and systemd reloaded; unit path absent/inactive; port 3001, MCP service, and required timers active/enabled; ports 3000, 3002, and 3003 closed; non-secret `snapshot_info` current; focused test 3 passed; full suite 192 passed, 18 skipped, 0 failed; typecheck, ShellCheck, shell syntax, and diff check passed | Initial findings fixed; focused verification and terminal audit pending |
+| 2026-07-14 | PR #24 review-fix validation | Retired installed unit moved to a root-only backup and systemd reloaded; unit path absent/inactive; port 3001, MCP service, and required timers active/enabled; ports 3000, 3002, and 3003 closed; non-secret `snapshot_info` current; focused test 3 passed; full suite 192 passed, 18 skipped, 0 failed; typecheck, ShellCheck, shell syntax, and diff check passed | Initial findings fixed; first focused verification found daemon-reload ordering and phase-label follow-ups |
 
 ## Blockers and Risks
 
@@ -53,4 +53,4 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 
 ## Handoff
 
-Next exact task: finish PR #24 fixes, deterministic gates, focused fix verification, and the opposite-runtime terminal audit without disrupting the active MCP path. After merge authorization and closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
+Next exact task: finish the focused-verifier follow-up, rerun deterministic gates and focused re-verification, then run the opposite-runtime terminal audit without disrupting the active MCP path. After merge authorization and closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.

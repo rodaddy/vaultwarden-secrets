@@ -98,9 +98,15 @@ describe("retired network deploy trigger", () => {
     expect(deployScript).toContain(`RETIRED_UNIT="${RETIRED_UNIT}"`);
     expect(deployScript).toContain('systemctl disable --now "$RETIRED_UNIT"');
     expect(deployScript).toContain('rm -f "$RETIRED_UNIT_PATH"');
-    expect(deployScript.indexOf("systemctl disable --now")).toBeLessThan(
-      deployScript.indexOf('if [ "$LOCAL" = "$REMOTE" ]'),
+    const disableIndex = deployScript.indexOf("systemctl disable --now");
+    const removeIndex = deployScript.indexOf('rm -f "$RETIRED_UNIT_PATH"');
+    const reloadIndex = deployScript.indexOf("systemctl daemon-reload");
+    const noChangeExitIndex = deployScript.indexOf(
+      'if [ "$LOCAL" = "$REMOTE" ]',
     );
+    expect(disableIndex).toBeLessThan(removeIndex);
+    expect(removeIndex).toBeLessThan(reloadIndex);
+    expect(reloadIndex).toBeLessThan(noChangeExitIndex);
     expect(deployScript).not.toMatch(
       /systemctl\s+(?:enable|restart|start)\s+"?\$RETIRED_UNIT"?/,
     );

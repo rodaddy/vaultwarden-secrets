@@ -18,6 +18,7 @@ if [ -e "$RETIRED_UNIT_PATH" ] || [ -L "$RETIRED_UNIT_PATH" ]; then
   rm -f "$RETIRED_UNIT_PATH"
   echo "[deploy] Removed retired $RETIRED_UNIT"
 fi
+systemctl daemon-reload
 
 # Fetch latest
 GIT_SSH_COMMAND="ssh -i /root/.ssh/id_ed25519_github -o StrictHostKeyChecking=accept-new" \
