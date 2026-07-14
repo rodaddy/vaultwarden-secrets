@@ -32,12 +32,15 @@ Validation required: payload-rejection tests, transactional/reconciliation failu
 Date: 2026-07-14
 Phase/task: Phase 0
 Issue(s): retired trigger #13, runtime #14
+Status: Superseded by D-006 after the active MCP dependency was discovered.
 
-Decision: Keep four legacy services and two timers stopped and disabled, ports 3000-3003 closed, and preserved data/snapshot untouched until the hard reactivation gate passes.
+Historical decision: Keep four legacy services and two timers stopped and disabled, ports 3000-3003 closed, and preserved data/snapshot untouched until the hard reactivation gate passes.
+
+Current decision: Preserve `vaultwarden-secrets-mcp.service` on port 3001 plus `vw-session-refresh.timer` and `vw-snapshot.timer`; keep only retired ports 3000, 3002, and 3003 and their services contained until an approved cutover.
 
 Reason: Containment prevents an unaudited runtime or deployment trigger from returning during redesign.
 Alternatives considered: run the legacy stack during development.
-Impact: live testing waits for controller approval; replacement units and ingress must be separately declared.
+Impact: live testing waits for controller approval; replacement units and ingress must be separately declared; compatibility checks must protect the active MCP path.
 Validation required: refreshed unit, timer, port, SSH/node-exporter, and snapshot receipts before any approved start.
 
 ### D-004 — Packet and epic are the run control plane

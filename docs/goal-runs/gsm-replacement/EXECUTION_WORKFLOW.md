@@ -2,7 +2,7 @@
 
 ## Source-of-Truth Rule
 
-Use current source files, current issue state, this packet, and verified deployed state in that order. Treat legacy checkout results and prior live observations as historical evidence. If source contradicts this packet, inspect the owning path, record the decision in `DECISIONS.md`, update the packet, then make the smallest owned change.
+Use current source and linked issue state for code and scope truth. Use freshly verified deployed state for runtime truth. This packet coordinates those owning sources but does not override either one. Treat legacy checkout results and prior live observations as historical evidence. If an owning source contradicts this packet, inspect the owning path, record the decision in `DECISIONS.md`, update the packet, then make the smallest owned change.
 
 ## Preflight Gate
 
@@ -33,10 +33,10 @@ Scope -> Tasks -> Implementation -> Targeted validation -> Regression -> Phase v
 - Establish the MCP compatibility baseline before redesign: inventory current consumers and tool/schema behavior, capture current `mcp2cli vaultwarden-secrets` contract tests, and define rollback/no-downtime cutover gates.
 - Keep port 3001 and its required timers healthy until approved cutover.
 
-- Preserve the stopped/disabled state and closed ports.
+- Preserve the stopped/disabled state of retired services and the closure of ports 3000, 3002, and 3003.
 - Remove only the retired port 3002 deploy trigger and prevent reactivation; replacement release automation is deferred to #14/#15.
 - Declare and enforce the hardened systemd, filesystem, network, ingress, rollback, and secret-bootstrap envelope.
-- Stop if any step would start a service before the hard reactivation gate.
+- Stop if any step would start a contained or replacement service before the hard reactivation gate; the protected MCP service on port 3001 remains active.
 
 ### Phase 1 — Identity and control-plane foundation
 

@@ -197,7 +197,7 @@ Examples:
   ./server-ctl.sh start
 
   # Start with custom port and profile
-  PORT=3002 SECURITY_PROFILE=im-aware API_TOKEN_TEST=secret123 ./server-ctl.sh start
+  PORT=3100 SECURITY_PROFILE=im-aware API_TOKEN_TEST=secret123 ./server-ctl.sh start
 
   # Test health endpoint
   ./server-ctl.sh test /health

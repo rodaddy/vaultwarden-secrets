@@ -13,7 +13,7 @@ This packet controls a greenfield internal control plane and compatibility-prese
 
 - Tracking source: this packet plus umbrella issue #12. This repository has no Project board as of 2026-07-14.
 - Existing issues: [#10](https://github.com/rodaddy/vaultwarden-secrets/issues/10), rotation epic; [#11](https://github.com/rodaddy/vaultwarden-secrets/issues/11), optional operator console.
-- Verified implementation issues, in dependency order: #23 MCP compatibility baseline; independent #13 retired-trigger removal; #14 hardened runtime; #15 workload identity; #16 metadata store; #17 version lifecycle; #18 authorization; #19 audit/outbox; #20 recovery; #21 rotation engine under epic #10; and #22 pilot consumer/cutover.
+- Verified implementation issues, in planned phase order: #23 MCP compatibility baseline; independent #13 retired-trigger removal; #14 hardened runtime; #15 workload identity; #16 metadata store; #17 version lifecycle; #18 authorization; #19 audit/outbox; #20 recovery; #21 rotation engine under epic #10; and #22 pilot consumer/cutover. The executable dependency graph is recorded in `TASKS.md`.
 - Historical inputs such as the dirty legacy checkout, stopped live services, and preserved snapshot are evidence only. This branch, current issues, and verified deployed state are authoritative.
 
 ## Packet Index
@@ -37,7 +37,7 @@ This packet controls a greenfield internal control plane and compatibility-prese
 
 ## Hard Reactivation Gate
 
-No legacy or replacement live service may start until every P0 runtime/security issue has met its acceptance criteria, the exact candidate has passed Full-tier review and required fix verification, the validation contract in `VALIDATION.md` is satisfied, and the controller explicitly approves reactivation. A healthy process or `/health` response alone never satisfies this gate.
+No contained retired service or replacement live service may start until every P0 runtime/security issue has met its acceptance criteria, the exact candidate has passed Full-tier review and required fix verification, the validation contract in `VALIDATION.md` is satisfied, and the controller explicitly approves reactivation. The protected MCP service on port 3001 and its required timers remain active during migration. A healthy process or `/health` response alone never satisfies this gate.
 
 ## Explicit Non-Goals
 

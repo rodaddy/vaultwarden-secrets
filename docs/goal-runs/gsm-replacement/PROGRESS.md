@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Status: packet preparation; implementation not started.
-- Current phase: compatibility baseline and migration guard are pending; the active MCP baseline is restored; P0 code and runtime work is pending.
+- Status: PR #24 is in Full-tier review fixes for issue #13.
+- Current phase: the active MCP baseline is restored; #13 retirement fixes and verification are in progress; the #23 compatibility baseline remains the next implementation issue.
 - Control plane: this packet plus umbrella issue #12; no repository Project board currently exists.
 - Scope: greenfield internal control plane with compatibility-preserving migration from the active MCP service, Vaultwarden payload custody, and an independent non-secret control plane.
 
@@ -14,7 +14,6 @@ The controller-provided containment inspection recorded:
 - `vaultwarden-secrets-mcp.service` on port 3001 is restored and required by `mcp2cli vaultwarden-secrets`; `vw-session-refresh.timer` and `vw-snapshot.timer` are restored and required.
 - Retired services remain disabled; ports 3000, 3002, and 3003 remain closed.
 - `vw-deploy.timer` was already disabled before containment and was not one of the two stopped timers.
-- Ports 3000, 3001, 3002, and 3003 closed.
 - SSH access and node-exporter preserved.
 - Existing data and encrypted snapshot preserved.
 
@@ -23,7 +22,7 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 ## Phase Checklist
 
 - [ ] Phase 0A: establish MCP compatibility baseline and cutover guard.
-- [x] Phase 0B: #13 remove retired deploy trigger and prevent reactivation.
+- [ ] Phase 0B: #13 remove retired deploy trigger and prevent reactivation — PR #24 review fixes and verification in progress.
 - [ ] Phase 0C: #14 hardened runtime and ingress envelope.
 - [ ] Phase 1A: #15 workload-identity transport.
 - [ ] Phase 1B: #16 metadata/reconciliation store.
@@ -40,17 +39,18 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 | Date | Scope | Evidence | Result |
 | --- | --- | --- | --- |
 | 2026-07-14 | Historical legacy dirty checkout | 229 passed, 36 skipped, 0 failed; typecheck passed | Context only; not proof for this clean branch |
-| 2026-07-14 | Live containment handoff | Four services and two timers inactive/disabled; ports 3000-3003 closed; SSH/node-exporter and snapshot preserved | Containment recorded; refresh required before reactivation |
+| 2026-07-14 | Initial live containment handoff | Four services and two timers inactive/disabled; ports 3000-3003 closed; SSH/node-exporter and snapshot preserved | Superseded after the active MCP dependency was discovered |
 | 2026-07-14 | MCP dependency correction and restoration | MCP service plus session/snapshot timers enabled and active; non-secret `snapshot_info` healthy and current | Active compatibility baseline restored; ports 3000, 3002, and 3003 remain closed |
 | 2026-07-14 | Issue #13 containment cleanup | Retired-trigger test: 2 passed; full suite: 191 passed, 18 skipped, 0 failed; typecheck, diff check, and focused retired-reference scan passed | Controller verified port 3002 closed while port 3001 and non-secret MCP probe remained healthy |
+| 2026-07-14 | PR #24 review-fix validation | Retired installed unit moved to a root-only backup and systemd reloaded; unit path absent/inactive; port 3001, MCP service, and required timers active/enabled; ports 3000, 3002, and 3003 closed; non-secret `snapshot_info` current; focused test 3 passed; full suite 192 passed, 18 skipped, 0 failed; typecheck, ShellCheck, shell syntax, and diff check passed | Initial findings fixed; focused verification and terminal audit pending |
 
 ## Blockers and Risks
 
-- DAG: #13 is independently ready with no #23 dependency; #23 gates #14 and #22; downstream dependencies otherwise remain unchanged.
+- DAG: #13 is independent; the full downstream dependency graph is explicit in `TASKS.md`.
 - Runtime topology, control-plane persistence technology, and pilot workload remain implementation decisions within the acceptance boundaries.
 - The legacy code exposes multiple auth profiles and deployment paths; retaining parallel contracts would undermine the single identity/runtime design.
 - Preserved snapshot/data are recovery assets, not proof that coordinated restore works.
 
 ## Handoff
 
-Next exact task: controller assigns #13 without starting live services. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
+Next exact task: finish PR #24 fixes, deterministic gates, focused fix verification, and the opposite-runtime terminal audit without disrupting the active MCP path. After merge authorization and closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.

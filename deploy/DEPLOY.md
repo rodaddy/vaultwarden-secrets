@@ -6,6 +6,8 @@ Step-by-step guide for deploying the HTTP secrets server to production.
 > trigger that listened on port 3002 has been removed and must not be restored.
 > Replacement release automation is deferred to issues #14 and #15. The active
 > MCP service on port 3001 is preserved and is not retired by this change.
+> On every run, `deploy/deploy.sh` disables, stops, and removes the exact
+> retired `vw-deploy-webhook.service` copy before checking for source changes.
 
 ## Prerequisites
 
