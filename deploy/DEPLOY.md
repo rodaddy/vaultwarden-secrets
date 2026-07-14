@@ -2,6 +2,11 @@
 
 Step-by-step guide for deploying the HTTP secrets server to production.
 
+> **Retired deployment trigger:** The unauthenticated automatic network deploy
+> trigger that listened on port 3002 has been removed and must not be restored.
+> Replacement release automation is deferred to issues #14 and #15. The active
+> MCP service on port 3001 is preserved and is not retired by this change.
+
 ## Prerequisites
 
 - Bun runtime installed (`curl -fsSL https://bun.sh/install | bash`)
