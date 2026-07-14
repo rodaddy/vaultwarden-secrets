@@ -22,6 +22,8 @@ const RETIRED_LEGACY_REFERENCES = [
 const RETIRED_PORT = /\b3002\b/;
 const RETIRED_UNIT = "vw-deploy-webhook.service";
 const RETIREMENT_SCRIPT = "deploy/deploy.sh";
+const CONTAINED_SERVICE_ACTIVATION =
+  /systemctl\s+(?:enable|restart|start)(?:\s+--now)?\s+["']?(?:vaultwarden-secrets|vw-cred-proxy)\.service\b/;
 
 function isActivationFile(repositoryPath: string): boolean {
   if (repositoryPath.endsWith(".test.ts")) {
@@ -110,5 +112,17 @@ describe("retired network deploy trigger", () => {
     expect(deployScript).not.toMatch(
       /systemctl\s+(?:enable|restart|start)\s+"?\$RETIRED_UNIT"?/,
     );
+  });
+
+  test("deployment restarts only the protected MCP service", () => {
+    const deployScript = readFileSync(
+      join(REPOSITORY_ROOT, RETIREMENT_SCRIPT),
+      "utf8",
+    );
+
+    expect(deployScript).toContain(
+      "systemctl restart vaultwarden-secrets-mcp.service",
+    );
+    expect(deployScript).not.toMatch(CONTAINED_SERVICE_ACTIVATION);
   });
 });

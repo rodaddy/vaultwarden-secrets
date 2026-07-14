@@ -48,9 +48,8 @@ for unit in deploy/systemd/*.service; do
 done
 systemctl daemon-reload
 
-# Restart services
-systemctl restart vaultwarden-secrets.service
+# Restart only the protected compatibility service. Ports 3000 and 3003 remain
+# contained until the hard reactivation gate is approved.
 systemctl restart vaultwarden-secrets-mcp.service
-systemctl restart vw-cred-proxy.service 2>/dev/null || true
 
-echo "[deploy] Services restarted"
+echo "[deploy] Protected MCP service restarted"
