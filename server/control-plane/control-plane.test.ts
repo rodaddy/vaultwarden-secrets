@@ -61,9 +61,14 @@ describe("control-plane migrations and metadata", () => {
     first.close();
     const second = new ControlPlaneStore({ databasePath: path, actor: "test" });
     expect(second.getSecret("repeatable")?.name).toBe("repeatable");
+    // This slice owns migrations 001 and 002; sibling slices may add their own
+    // (e.g. 100_authz). Assert our migrations are applied exactly once rather
+    // than pinning a global count that legitimately grows across slices.
     expect(
       second.database.db
-        .query("SELECT COUNT(*) AS count FROM schema_migrations")
+        .query(
+          "SELECT COUNT(*) AS count FROM schema_migrations WHERE name IN ('001_control_plane.sql', '002_ledger_head_and_outbox_dedupe.sql')",
+        )
         .get(),
     ).toEqual({ count: 2 });
     expect(
