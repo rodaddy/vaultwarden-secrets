@@ -12,6 +12,32 @@ Step-by-step guide for deploying the HTTP secrets server to production.
 > MCP service on port 3001; the port-3000 and port-3003 services remain
 > contained until the hard reactivation gate is approved.
 
+## Deploy operator & privilege model
+
+Automated deploys (`deploy/deploy.sh`, via `vw-deploy.service`) run as the
+**operator user `rico`**, NOT root. `deploy.sh` performs every privileged action
+(`systemctl`, `daemon-reload`, writing units into `/etc/systemd/system`) through
+`run_privileged()`, which prefixes `sudo -n` (non-interactive) against a
+command-scoped NOPASSWD grant — never a root shell, never blanket sudo.
+
+Install and validate that grant before the first automated deploy:
+
+```bash
+sudo install -m 0440 -o root -g root \
+  deploy/sudoers.d/vaultwarden-secrets /etc/sudoers.d/vaultwarden-secrets
+visudo -cf /etc/sudoers.d/vaultwarden-secrets   # must print "parsed OK"
+```
+
+The grant honors the sudoers exact-write / wildcard-read rule (write verbs
+exact-match; read commands carry a trailing ` *` for flags). A missing grant
+makes `sudo -n` fail loudly and `deploy.sh` points at the sudoers file — it
+never silently degrades to root. The operator's read-only GitHub deploy key is
+`VW_DEPLOY_SSH_KEY` (default `${HOME}/.ssh/id_ed25519_github` — the operator's
+key, never `/root`'s).
+
+The manual `sudo`-prefixed steps below are for a first-time hand install by an
+admin; the ongoing automated path uses the scoped grant above.
+
 ## Prerequisites
 
 - Bun runtime installed (`curl -fsSL https://bun.sh/install | bash`)
@@ -30,14 +56,20 @@ sudo tar xzf vaultwarden-secrets-v*.tar.gz
 sudo mv vaultwarden-secrets-v* vaultwarden-secrets
 ```
 
-### 2. Create Service User
+### 2. Service User (provisioned upstream)
+
+The runtime services run as the dedicated non-root user `vaultwarden-secrets`
+(group `ai-services`, alongside sibling service users like `mcp2cli`). This
+account is provisioned **UPSTREAM** in the TN01/rtech-infra directory scheme
+(UIDs synced from TN01) — do NOT create it here. Deploy preflight fails closed
+if it is absent.
 
 ```bash
-# Create dedicated user (no shell access)
-sudo useradd -r -s /usr/sbin/nologin vw-secrets
+# Confirm the upstream-provisioned identity exists (do not create it here):
+id vaultwarden-secrets
 
-# Set ownership
-sudo chown -R vw-secrets:vw-secrets /opt/vaultwarden-secrets
+# Set ownership of the code tree to the service identity:
+sudo chown -R vaultwarden-secrets:ai-services /opt/vaultwarden-secrets
 ```
 
 ### 3. Configure Environment
@@ -74,7 +106,7 @@ NODE_ENV=production
 
 ```bash
 sudo chmod 600 .env
-sudo chown vw-secrets:vw-secrets .env
+sudo chown vaultwarden-secrets:ai-services .env
 ```
 
 ### 4. Install systemd Service
@@ -102,7 +134,7 @@ sudo systemctl status vaultwarden-secrets
 
 **Service configuration notes:**
 
-- **User:** Change `User=vw-secrets` if using different user
+- **User:** Change `User=vaultwarden-secrets` if using different user
 - **WorkingDirectory:** Update if installed in different location
 - **Environment variables:** Can be set in service file OR use `.env` file
 - **ExecStart:** Verify bun path (`which bun`) matches `/usr/local/bin/bun`
@@ -253,7 +285,7 @@ sudo mv vaultwarden-secrets-vX.Y.Z vaultwarden-secrets
 sudo cp /opt/vaultwarden-secrets.backup/.env /opt/vaultwarden-secrets/
 
 # Fix permissions
-sudo chown -R vw-secrets:vw-secrets /opt/vaultwarden-secrets
+sudo chown -R vaultwarden-secrets:ai-services /opt/vaultwarden-secrets
 
 # Start service
 sudo systemctl start vaultwarden-secrets
@@ -319,8 +351,8 @@ curl http://localhost:3000/health
 
 ```bash
 # Re-authenticate as service user
-sudo -u vw-secrets bw login
-sudo -u vw-secrets bw unlock
+sudo -u vaultwarden-secrets bw login
+sudo -u vaultwarden-secrets bw unlock
 
 # Or configure session token in environment
 ```

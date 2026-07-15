@@ -46,7 +46,7 @@ ENV_FILE="$FAKE_ROOT/app.env"
 : > "$ENV_FILE"
 
 # The current (test) user — a user that definitely exists, standing in for
-# the vwsecrets service account so readable_by works without root.
+# the vaultwarden-secrets service account so readable_by works without root.
 TEST_USER=$(id -un)
 
 # Source the deploy functions only.
@@ -60,6 +60,18 @@ VW_LIB_ONLY=1 \
 # their systemctl calls need to be inert here. On the live host systemctl is
 # real and its failures are NOT suppressed by the production code.
 systemctl() { return 0; }
+
+# Stub run_privileged: on the live host it prefixes `sudo -n` (scoped NOPASSWD),
+# but this offline harness has no sudo/systemd. Run the wrapped command directly
+# so the real filesystem work in backup_unit/restore_unit/remove_unit still
+# executes while the stubbed systemctl above stays inert. `run_privileged -u
+# <user> test -r` (from readable_by) also resolves to a direct `test -r` here.
+run_privileged() {
+  if [ "$1" = "-u" ]; then
+    shift 2   # drop "-u <user>"; the checked file is readable by the test user
+  fi
+  "$@"
+}
 
 # Helper to write a unit file.
 write_unit() {

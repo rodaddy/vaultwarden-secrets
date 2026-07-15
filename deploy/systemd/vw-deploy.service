@@ -4,7 +4,16 @@ After=network.target
 
 [Service]
 Type=oneshot
+# Deploy orchestrator runs as the OPERATOR `rico`, NOT root. deploy.sh performs
+# every privileged action (systemctl, daemon-reload, writes into
+# /etc/systemd/system) via command-scoped NOPASSWD sudo defined in
+# deploy/sudoers.d/vaultwarden-secrets — never a root shell, never blanket sudo.
+User=rico
+Group=rico
 WorkingDirectory=/opt/vaultwarden-secrets
 ExecStart=/opt/vaultwarden-secrets/deploy/deploy.sh
-Environment=HOME=/root
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.bun/bin
+# Operator HOME + PATH. bun is on PATH via /usr/local/bin (system install), not
+# a root-owned /root/.bun the operator cannot read. The operator's deploy key is
+# resolved from $HOME by deploy.sh (VW_DEPLOY_SSH_KEY).
+Environment=HOME=/home/rico
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/rico/.bun/bin

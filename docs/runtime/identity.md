@@ -110,7 +110,7 @@ bun run scripts/identity-admin.ts rotate --id <id> --overlap 300
 ## Operator CLI — targeting the SERVICE store (DEP-4)
 
 The admin CLI mutates the store at `VW_STATE_DIR`. The systemd services run as
-`vwsecrets` with `VW_STATE_DIR=/var/lib/vaultwarden-secrets/state`. If you run
+`vaultwarden-secrets` with `VW_STATE_DIR=/var/lib/vaultwarden-secrets/state`. If you run
 the CLI as your login user with `VW_STATE_DIR` unset, you edit a **different**
 per-user store and the services will not see your changes. The CLI prints the
 resolved store path on every run and warns loudly on the default fallback.
@@ -118,16 +118,16 @@ resolved store path on every run and warns loudly on the default fallback.
 Always target the service store explicitly:
 
 ```sh
-sudo -u vwsecrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
+sudo -u vaultwarden-secrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
   bun run scripts/identity-admin.ts issue --subject svc:deployer --audiences rest,mcp --ttl 3600
 
-sudo -u vwsecrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
+sudo -u vaultwarden-secrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
   bun run scripts/identity-admin.ts list
 
-sudo -u vwsecrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
+sudo -u vaultwarden-secrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
   bun run scripts/identity-admin.ts revoke --id <id>
 
-sudo -u vwsecrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
+sudo -u vaultwarden-secrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \
   bun run scripts/identity-admin.ts rotate --id <id> --overlap 300
 ```
 

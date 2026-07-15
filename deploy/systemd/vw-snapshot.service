@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=oneshot
 # Dedicated non-root service identity (issue #14).
-User=vwsecrets
-Group=vwsecrets
+User=vaultwarden-secrets
+Group=ai-services
 WorkingDirectory=/opt/vaultwarden-secrets
 
 StateDirectory=vaultwarden-secrets
