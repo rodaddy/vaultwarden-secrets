@@ -74,6 +74,10 @@ err()  { echo "[deploy] ERROR: $*" >&2; }
 #     loud, actionable error pointing at the scoped sudoers file. We NEVER fall
 #     back to a root shell or a blanket/interactive sudo.
 run_privileged() {
+  # FAIL CLOSED: return the wrapped command's ACTUAL exit code, unmasked. No
+  # enclosing `if ... then return 0` that could swallow a denial (P0-1). Under
+  # `set -e` a bare `run_privileged ...` call aborts the deploy on nonzero;
+  # call sites that intentionally tolerate failure use an explicit `|| true`.
   if [ "$(id -u)" = "0" ]; then
     "$@"
     return $?
@@ -83,13 +87,27 @@ run_privileged() {
     err "install the scoped grant at $SUDOERS_FILE and ensure sudo is present"
     return 1
   fi
-  if sudo -n "$@"; then
-    return 0
-  fi
+  # Direct passthrough of sudo's exit status — a denied NOPASSWD grant makes
+  # `sudo -n` exit nonzero and that nonzero propagates unchanged.
+  sudo -n "$@"
   _rc=$?
-  err "privileged command failed (rc=$_rc): sudo -n $*"
-  err "if this is a NOPASSWD-grant gap, fix $SUDOERS_FILE (validate: visudo -cf $SUDOERS_FILE)"
+  if [ "$_rc" -ne 0 ]; then
+    err "privileged command DENIED/failed (rc=$_rc): sudo -n $*"
+    err "if this is a NOPASSWD-grant gap, fix $SUDOERS_FILE (validate: visudo -cf $SUDOERS_FILE)"
+  fi
   return "$_rc"
+}
+
+# Fatal privileged action: run_privileged, but ABORT the whole deploy on any
+# nonzero. Used for every privileged step whose failure must NOT be tolerated,
+# so we never rely on `set -e` implicitly catching a function's return status
+# (unreliable across POSIX shells). Call sites that intentionally tolerate
+# failure use `run_privileged ... || true` instead.
+must_privileged() {
+  if ! run_privileged "$@"; then
+    err "aborting deploy: required privileged step failed: $*"
+    exit 1
+  fi
 }
 
 # --- preflight helpers ------------------------------------------------------
@@ -243,10 +261,10 @@ deploy_main() {
   # Retire the removed unauthenticated network deploy trigger.
   run_privileged systemctl disable --now "$RETIRED_UNIT" >/dev/null 2>&1 || true
   if [ -e "$RETIRED_UNIT_PATH" ] || [ -L "$RETIRED_UNIT_PATH" ]; then
-    run_privileged rm -f "$RETIRED_UNIT_PATH"
+    must_privileged rm -f "$RETIRED_UNIT_PATH"
     log "Removed retired $RETIRED_UNIT"
   fi
-  run_privileged systemctl daemon-reload
+  must_privileged systemctl daemon-reload
 
   # Fetch as the OPERATOR using the operator's read-only deploy key (never
   # /root's key). VW_DEPLOY_SSH_KEY is configurable; default is under $HOME.
@@ -285,8 +303,8 @@ deploy_main() {
   # Start each deploy with a clean backup dir so a stale backup from a prior
   # deploy can never become a wrong restore source (DEP-2). SYSTEMD_DIR is
   # root-owned, so these mutations are privileged.
-  run_privileged rm -rf "$BACKUP_DIR"
-  run_privileged mkdir -p "$BACKUP_DIR"
+  must_privileged rm -rf "$BACKUP_DIR"
+  must_privileged mkdir -p "$BACKUP_DIR"
 
   # Sync changed units, backing up the previous version first (DEP-2).
   _changed=0
@@ -294,12 +312,12 @@ deploy_main() {
     _name=$(basename "$unit")
     if ! cmp -s "$unit" "$SYSTEMD_DIR/$_name" 2>/dev/null; then
       backup_unit "$_name"
-      run_privileged install -m 0644 "$unit" "$SYSTEMD_DIR/$_name"
+      must_privileged install -m 0644 "$unit" "$SYSTEMD_DIR/$_name"
       log "Updated $_name"
       _changed=1
     fi
   done
-  run_privileged systemctl daemon-reload
+  must_privileged systemctl daemon-reload
 
   # DEP-2: guarantee a restorable snapshot of the MCP unit BEFORE restarting it,
   # whether or not its own content changed this deploy. Otherwise a failed
@@ -324,7 +342,7 @@ deploy_main() {
   # Restart the protected MCP unit (only ever stopped via its own restart), then
   # verify health; roll back on failure. Literal name kept for the retirement
   # contract test.
-  run_privileged systemctl restart vaultwarden-secrets-mcp.service
+  must_privileged systemctl restart vaultwarden-secrets-mcp.service
   if verify_mcp_health; then
     log "Protected MCP service restarted and healthy"
   else
@@ -372,10 +390,11 @@ verify_mcp_health() {
 
 backup_unit() {
   _name="$1"
-  # BACKUP_DIR lives under the root-owned SYSTEMD_DIR — privileged writes.
-  run_privileged mkdir -p "$BACKUP_DIR"
+  # BACKUP_DIR lives under the root-owned SYSTEMD_DIR — privileged writes. A
+  # failed backup must abort: DEP-2 rollback depends on a restorable snapshot.
+  must_privileged mkdir -p "$BACKUP_DIR"
   if [ -f "$SYSTEMD_DIR/$_name" ]; then
-    run_privileged install -m 0644 "$SYSTEMD_DIR/$_name" "$BACKUP_DIR/$_name"
+    must_privileged install -m 0644 "$SYSTEMD_DIR/$_name" "$BACKUP_DIR/$_name"
     log "backed up $_name -> $BACKUP_DIR/$_name"
   fi
 }
@@ -383,8 +402,10 @@ backup_unit() {
 restore_unit() {
   _name="$1"
   if [ -f "$BACKUP_DIR/$_name" ]; then
-    run_privileged install -m 0644 "$BACKUP_DIR/$_name" "$SYSTEMD_DIR/$_name"
-    run_privileged systemctl daemon-reload
+    # Rollback restore is critical — a denied grant here must abort loudly, not
+    # leave a broken unit silently in place.
+    must_privileged install -m 0644 "$BACKUP_DIR/$_name" "$SYSTEMD_DIR/$_name"
+    must_privileged systemctl daemon-reload
     log "restored $_name from backup"
     return 0
   fi
@@ -397,13 +418,15 @@ restore_unit() {
 remove_unit() {
   _name="$1"
   run_privileged systemctl stop "$_name" 2>/dev/null || true
-  run_privileged rm -f "$SYSTEMD_DIR/$_name"
-  run_privileged systemctl daemon-reload
+  must_privileged rm -f "$SYSTEMD_DIR/$_name"
+  must_privileged systemctl daemon-reload
   log "removed newly-installed $_name (no prior version to roll back to)"
 }
 
 # When sourced by a test harness, stop here (functions only).
 if [ "${VW_LIB_ONLY:-0}" = "1" ]; then
+  # `return` works when sourced; the `|| exit 0` is the executed-directly path.
+  # shellcheck disable=SC2317  # reachable via the sourced-vs-executed idiom
   return 0 2>/dev/null || exit 0
 fi
 
