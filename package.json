@@ -40,7 +40,9 @@
     "uninstall": "./install.sh --uninstall",
     "set-session": "bun run cli.ts set-session",
     "get": "bun run cli.ts get",
-    "cred-proxy": "bun run server/cred-proxy.ts"
+    "cred-proxy": "bun run server/cred-proxy.ts",
+    "identity": "bun run scripts/identity-admin.ts",
+    "drift-check": "bun run scripts/drift-check.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

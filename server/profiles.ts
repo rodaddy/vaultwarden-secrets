@@ -3,8 +3,13 @@
  * Choose based on your deployment environment and security requirements
  */
 
-export type AuditLevel = 'none' | 'basic' | 'standard' | 'detailed' | 'forensic';
-export type AuthType = false | 'bearer' | 'oauth2' | 'mtls+jwt';
+export type AuditLevel =
+  | "none"
+  | "basic"
+  | "standard"
+  | "detailed"
+  | "forensic";
+export type AuthType = false | "bearer" | "oauth2" | "mtls+jwt";
 
 export interface RateLimitConfig {
   requests: number;
@@ -22,11 +27,11 @@ export interface SecurityProfile {
   name: string;
   description: string;
   auth: AuthType;
-  ipWhitelist: boolean | string[] | 'auto'; // 'auto' = auto-detect local network
-  tls: boolean | 'recommended' | 'required' | 'required+strict';
+  ipWhitelist: boolean | string[] | "auto"; // 'auto' = auto-detect local network
+  tls: boolean | "recommended" | "required" | "required+strict";
   audit: AuditLevel;
   rateLimit: false | RateLimitConfig;
-  clientAuth?: 'none' | 'api-key' | 'oauth2' | 'certificate';
+  clientAuth?: "none" | "api-key" | "oauth2" | "certificate";
   tokenExpiry?: number;
   refreshTokens?: boolean;
   requireClientCert?: boolean;
@@ -43,70 +48,70 @@ export interface SecurityProfile {
 }
 
 export const SecurityProfiles = {
-  'feeling-lucky': {
-    name: 'Feeling Lucky',
-    description: 'DEVELOPMENT ONLY - Auto-detects local network for security',
+  "feeling-lucky": {
+    name: "Feeling Lucky",
+    description: "DEVELOPMENT ONLY - Auto-detects local network for security",
     auth: false,
-    ipWhitelist: 'auto', // Auto-detect local /24
+    ipWhitelist: "auto", // Auto-detect local /24
     tls: false,
-    audit: 'basic',
+    audit: "basic",
     rateLimit: false,
-    clientAuth: 'none',
+    clientAuth: "none",
     allowWrites: true,
     writeConfirmation: false,
     folderScope: [],
-    warning: '⚠️  NEVER USE IN PRODUCTION - NO SECURITY ⚠️',
+    warning: "⚠️  NEVER USE IN PRODUCTION - NO SECURITY ⚠️",
   },
 
-  'im-aware': {
+  "im-aware": {
     name: "I'm Aware",
-    description: 'Simple API token - Good for homelab/internal networks',
-    auth: 'bearer',
-    ipWhitelist: 'auto', // Auto-detect local /24, can add more via env
-    tls: 'recommended',
-    audit: 'standard',
+    description: "Simple API token - Good for homelab/internal networks",
+    auth: "bearer",
+    ipWhitelist: "auto", // Auto-detect local /24, can add more via env
+    tls: "recommended",
+    audit: "standard",
     rateLimit: {
       requests: 100,
-      window: '1m',
+      window: "1m",
     },
-    clientAuth: 'api-key',
+    clientAuth: "api-key",
     allowWrites: true,
     writeConfirmation: true,
-    folderScope: ['Infrastructure'],
+    folderScope: ["Infrastructure"],
   },
 
-  'im-a-dev': {
+  "im-a-dev": {
     name: "I'm a Dev",
-    description: 'OAuth2 flow - Production-ready for human users',
-    auth: 'oauth2',
-    ipWhitelist: 'auto', // Auto-detect local /24, Docker-aware
-    tls: 'required',
-    audit: 'detailed',
+    description: "OAuth2 flow - Production-ready for human users",
+    auth: "oauth2",
+    ipWhitelist: "auto", // Auto-detect local /24, Docker-aware
+    tls: "required",
+    audit: "detailed",
     rateLimit: {
       requests: 60,
-      window: '1m',
+      window: "1m",
     },
-    clientAuth: 'oauth2',
+    clientAuth: "oauth2",
     tokenExpiry: 900, // 15 minutes
     refreshTokens: true,
     allowWrites: true,
     writeConfirmation: true,
-    folderScope: ['Infrastructure'],
+    folderScope: ["Infrastructure"],
   },
 
-  'trust-no-one': {
-    name: 'Trust No One',
-    description: 'MAXIMUM PARANOIA - Multi-layer defense in depth',
-    auth: 'mtls+jwt',
-    ipWhitelist: ['127.0.0.1/32'], // Localhost only, must add IPs explicitly
-    tls: 'required+strict',
-    audit: 'forensic',
+  "trust-no-one": {
+    name: "Trust No One",
+    description: "MAXIMUM PARANOIA - Multi-layer defense in depth",
+    auth: "mtls+jwt",
+    ipWhitelist: ["127.0.0.1/32"], // Localhost only, must add IPs explicitly
+    tls: "required+strict",
+    audit: "forensic",
     rateLimit: {
       requests: 30,
-      window: '1m',
+      window: "1m",
       burst: 5,
     },
-    clientAuth: 'certificate',
+    clientAuth: "certificate",
     tokenExpiry: 300, // 5 minutes
     requireClientCert: true,
     allowedCertFingerprints: [],
@@ -127,12 +132,12 @@ export const SecurityProfiles = {
  * All point to trust-no-one (the maximum paranoia profile)
  */
 export const ProfileAliases: Record<string, keyof typeof SecurityProfiles> = {
-  'openclaw': 'trust-no-one',
-  'tinfoil-hat': 'trust-no-one',
-  'maximum-paranoia': 'trust-no-one',
-  'aluminum-foil': 'trust-no-one',
-  'aluminium-hat': 'trust-no-one',
-  'fort-knox': 'trust-no-one',
+  openclaw: "trust-no-one",
+  "tinfoil-hat": "trust-no-one",
+  "maximum-paranoia": "trust-no-one",
+  "aluminum-foil": "trust-no-one",
+  "aluminium-hat": "trust-no-one",
+  "fort-knox": "trust-no-one",
 };
 
 export type ProfileName = keyof typeof SecurityProfiles;
@@ -149,9 +154,9 @@ export function getProfile(name: string): SecurityProfile {
     const allOptions = [
       ...Object.keys(SecurityProfiles),
       ...Object.keys(ProfileAliases),
-    ].join(', ');
+    ].join(", ");
     throw new Error(
-      `Unknown security profile: ${name}. Valid options: ${allOptions}`
+      `Unknown security profile: ${name}. Valid options: ${allOptions}`,
     );
   }
   return SecurityProfiles[resolvedName as ProfileName];
@@ -162,21 +167,30 @@ export function getProfile(name: string): SecurityProfile {
  */
 export function validateProfile(profile: SecurityProfile): void {
   // Check for dangerous configs
-  if (profile.auth === false && process.env.NODE_ENV === 'production') {
+  if (profile.auth === false && process.env.NODE_ENV === "production") {
     throw new Error(
-      'Cannot use "feeling-lucky" profile in production (NODE_ENV=production)'
+      'Cannot use "feeling-lucky" profile in production (NODE_ENV=production)',
     );
   }
 
-  if (profile.tls === 'required' && !process.env.TLS_CERT) {
+  if (profile.tls === "required" && !process.env.TLS_CERT) {
     throw new Error(
-      `Profile "${profile.name}" requires TLS but TLS_CERT not set`
+      `Profile "${profile.name}" requires TLS but TLS_CERT not set`,
+    );
+  }
+
+  // Issue #14: operator can promote 'recommended' TLS to fail-closed via
+  // VW_REQUIRE_TLS=1 (the runtime resolveIngressTls enforces the actual exit;
+  // this surfaces the misconfiguration earlier).
+  if (process.env.VW_REQUIRE_TLS === "1" && !process.env.TLS_CERT) {
+    throw new Error(
+      `VW_REQUIRE_TLS=1 but TLS_CERT not set (encrypted ingress required)`,
     );
   }
 
   if (profile.requireClientCert && !profile.allowedCertFingerprints?.length) {
     console.warn(
-      `⚠️  Client cert required but no fingerprints configured - will reject all requests`
+      `⚠️  Client cert required but no fingerprints configured - will reject all requests`,
     );
   }
 }
