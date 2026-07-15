@@ -3,80 +3,91 @@
  * Provides HTTP API for secret retrieval with tiered security profiles
  */
 
-import { Hono, type Context } from 'hono';
-import { cors } from 'hono/cors';
-import { getProfile, validateProfile } from './profiles';
-import { getSecret, getSecretObject, listSecrets, listVaults, clearCache, getCacheStats } from '../index';
-import { ipWhitelist } from './middleware/ip-whitelist';
-import { bearerAuth, loadBearerTokens } from './middleware/bearer-auth';
-import { oauth2Auth } from './middleware/oauth2-auth';
-import { rateLimit } from './middleware/rate-limit';
-import { auditLogger } from './middleware/audit-logger';
-import { detectLocalNetwork } from './utils/network-detect';
-import { responseEncryption } from './middleware/response-encryption';
-import { createAuthRouter, loadOAuthClients } from './routes/auth';
-import { FolderScope, loadFolderScopes } from './utils/folder-scope';
-import { snapshotManager } from '../snapshot';
-import { getVaultSession } from '../keychain';
+import { Hono, type Context } from "hono";
+import { cors } from "hono/cors";
+import { getProfile, validateProfile } from "./profiles";
+import {
+  getSecret,
+  getSecretObject,
+  listSecrets,
+  listVaults,
+  clearCache,
+  getCacheStats,
+} from "../index";
+import { ipWhitelist } from "./middleware/ip-whitelist";
+import { loadBearerTokens } from "./middleware/bearer-auth";
+import { workloadIdentity } from "./middleware/workload-identity";
+import { resolveIngressTls } from "./utils/tls";
+import { oauth2Auth } from "./middleware/oauth2-auth";
+import { rateLimit } from "./middleware/rate-limit";
+import { auditLogger } from "./middleware/audit-logger";
+import { detectLocalNetwork } from "./utils/network-detect";
+import { responseEncryption } from "./middleware/response-encryption";
+import { createAuthRouter, loadOAuthClients } from "./routes/auth";
+import { FolderScope, loadFolderScopes } from "./utils/folder-scope";
+import { snapshotManager } from "../snapshot";
+import { getVaultSession } from "../keychain";
 
 const app = new Hono();
 
 // Load security profile
-const SECURITY_PROFILE = process.env.SECURITY_PROFILE || 'im-aware';
+const SECURITY_PROFILE = process.env.SECURITY_PROFILE || "im-aware";
 const profile = getProfile(SECURITY_PROFILE);
 
 // Validate profile configuration
 validateProfile(profile);
 
-console.log('');
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log("");
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 console.log(`🔒 Security Profile: ${profile.name}`);
 console.log(`   ${profile.description}`);
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-console.log('');
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+console.log("");
 
 // Display warning for insecure profiles
 if (profile.warning) {
   console.warn(profile.warning);
-  console.log('');
+  console.log("");
 }
 
 // Apply CORS
 if (profile.ipWhitelist === false) {
-  app.use('*', cors());
+  app.use("*", cors());
 } else {
   const allowedOrigins = Array.isArray(profile.ipWhitelist)
-    ? profile.ipWhitelist.map(ip => `http://${ip}`)
-    : ['http://10.71.20.*'];
+    ? profile.ipWhitelist.map((ip) => `http://${ip}`)
+    : ["http://10.71.20.*"];
 
-  app.use('*', cors({ origin: allowedOrigins }));
+  app.use("*", cors({ origin: allowedOrigins }));
 }
 
 // Health check endpoint (always public, no auth required)
-app.get('/health', (c) => {
+app.get("/health", (c) => {
   return c.json({
-    status: 'ok',
+    status: "ok",
     profile: profile.name,
     timestamp: new Date().toISOString(),
   });
 });
 
 // Apply middleware based on profile
-console.log('Active security layers:');
+console.log("Active security layers:");
 
 // 1. IP Whitelist (with auto-detection)
 if (profile.ipWhitelist) {
   let ranges: string[] = [];
 
   // Auto-detect local network
-  if (profile.ipWhitelist === 'auto') {
+  if (profile.ipWhitelist === "auto") {
     const detected = await detectLocalNetwork();
     if (detected) {
       ranges = [detected];
       console.log(`  ℹ Auto-detected network: ${detected}`);
     } else {
-      console.warn('  ⚠  Could not auto-detect network, using RFC1918 private networks');
-      ranges = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
+      console.warn(
+        "  ⚠  Could not auto-detect network, using RFC1918 private networks",
+      );
+      ranges = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
     }
   } else if (Array.isArray(profile.ipWhitelist)) {
     ranges = profile.ipWhitelist;
@@ -84,81 +95,92 @@ if (profile.ipWhitelist) {
 
   // Environment override
   if (process.env.IP_WHITELIST) {
-    if (process.env.IP_WHITELIST === 'disable') {
-      if (profile.name === 'OpenClaw / Clawdbot') {
-        console.error('❌ Cannot disable IP whitelist for openclaw profile');
+    if (process.env.IP_WHITELIST === "disable") {
+      if (profile.name === "OpenClaw / Clawdbot") {
+        console.error("❌ Cannot disable IP whitelist for openclaw profile");
         process.exit(1);
       }
-      console.warn('  ⚠  IP Whitelist: DISABLED (via IP_WHITELIST=disable)');
+      console.warn("  ⚠  IP Whitelist: DISABLED (via IP_WHITELIST=disable)");
     } else {
-      const envRanges = process.env.IP_WHITELIST.split(',');
+      const envRanges = process.env.IP_WHITELIST.split(",");
       // For openclaw, add to base (127.0.0.1/32)
-      if (profile.name === 'OpenClaw / Clawdbot') {
+      if (profile.name === "OpenClaw / Clawdbot") {
         ranges = [...ranges, ...envRanges];
       } else {
         ranges = envRanges;
       }
-      console.log(`  ℹ IP_WHITELIST override: ${envRanges.join(', ')}`);
+      console.log(`  ℹ IP_WHITELIST override: ${envRanges.join(", ")}`);
     }
   }
 
   if (ranges.length > 0) {
-    app.use('*', ipWhitelist(ranges));
-    console.log(`  ✓ IP Whitelist: ${ranges.join(', ')}`);
+    app.use("*", ipWhitelist(ranges));
+    console.log(`  ✓ IP Whitelist: ${ranges.join(", ")}`);
   }
 }
 
 // 2. Rate Limiting
 if (profile.rateLimit) {
-  app.use('*', rateLimit(profile.rateLimit));
-  console.log(`  ✓ Rate Limiting: ${profile.rateLimit.requests}/${profile.rateLimit.window}`);
+  app.use("*", rateLimit(profile.rateLimit));
+  console.log(
+    `  ✓ Rate Limiting: ${profile.rateLimit.requests}/${profile.rateLimit.window}`,
+  );
 }
 
 // 3. Authentication
-if (profile.auth === 'bearer') {
-  const tokens = loadBearerTokens();
-  if (tokens.size === 0) {
-    console.error('❌ No API tokens configured!');
-    console.error('   Set tokens via: export API_TOKEN_<CLIENT>=<token>');
-    process.exit(1);
+if (profile.auth === "bearer") {
+  // Workload-identity (issue #15): new opaque vwsk_ tokens for audience "rest",
+  // with legacy API_TOKEN_<CLIENT> bearer tokens still accepted during
+  // migration (subject "legacy:<client>"). Fail-closed 401.
+  const legacyTokens = loadBearerTokens();
+  if (legacyTokens.size === 0) {
+    console.warn(
+      "  ⚠  No legacy API tokens configured (workload-identity tokens still accepted)",
+    );
   }
-  app.use('*', bearerAuth({ tokens }));
-  console.log(`  ✓ Bearer Auth: ${tokens.size} client(s) configured`);
-} else if (profile.auth === 'oauth2') {
+  app.use("*", workloadIdentity({ audience: "rest", legacyTokens }));
+  console.log(
+    `  ✓ Workload Identity: audience=rest, ${legacyTokens.size} legacy client(s)`,
+  );
+} else if (profile.auth === "oauth2") {
   const clients = loadOAuthClients();
   if (clients.size === 0) {
-    console.error('❌ No OAuth2 clients configured!');
-    console.error('   Set via: export OAUTH_CLIENT_ID=<id> OAUTH_CLIENT_SECRET=<secret>');
-    console.error('   Or set: export OAUTH_CLIENTS_FILE=/path/to/clients.json');
+    console.error("❌ No OAuth2 clients configured!");
+    console.error(
+      "   Set via: export OAUTH_CLIENT_ID=<id> OAUTH_CLIENT_SECRET=<secret>",
+    );
+    console.error("   Or set: export OAUTH_CLIENTS_FILE=/path/to/clients.json");
     process.exit(1);
   }
 
   // Mount auth routes
   const authRouter = createAuthRouter(clients);
-  app.route('/auth', authRouter);
+  app.route("/auth", authRouter);
 
   // Apply OAuth2 middleware
-  app.use('*', oauth2Auth());
+  app.use("*", oauth2Auth());
   console.log(`  ✓ OAuth2 Auth: ${clients.size} client(s) configured`);
-} else if (profile.auth === 'mtls+jwt') {
+} else if (profile.auth === "mtls+jwt") {
   // Apply combined mTLS + JWT middleware
-  const { createCombinedAuth } = await import('./middleware/combined-auth');
+  const { createCombinedAuth } = await import("./middleware/combined-auth");
   const combinedAuthMiddleware = await createCombinedAuth();
-  app.use('*', combinedAuthMiddleware);
-  console.log('  ✓ Combined Auth: mTLS + JWT (defense in depth)');
+  app.use("*", combinedAuthMiddleware);
+  console.log("  ✓ Combined Auth: mTLS + JWT (defense in depth)");
 } else if (profile.auth === false) {
-  console.warn('  ⚠  No authentication');
+  console.warn("  ⚠  No authentication");
 }
 
 // 4. Audit Logging
 const auditLogFile = process.env.AUDIT_LOG_FILE;
-app.use('*', auditLogger(profile.audit, auditLogFile));
-console.log(`  ✓ Audit Logging: ${profile.audit}${auditLogFile ? ` → ${auditLogFile}` : ' (console only)'}`);
+app.use("*", auditLogger(profile.audit, auditLogFile));
+console.log(
+  `  ✓ Audit Logging: ${profile.audit}${auditLogFile ? ` → ${auditLogFile}` : " (console only)"}`,
+);
 
 // 5. Response Encryption
 if (profile.secretsEncrypted) {
-  app.use('*', responseEncryption(profile));
-  console.log('  ✓ Response Encryption: ECDH P-256 + AES-256-GCM');
+  app.use("*", responseEncryption(profile));
+  console.log("  ✓ Response Encryption: ECDH P-256 + AES-256-GCM");
 }
 
 // 6. Folder Scoping (per-client)
@@ -167,33 +189,35 @@ const folderScope = new FolderScope(folderScopeConfig);
 if (folderScopeConfig.size > 0) {
   await folderScope.initialize();
 } else {
-  console.log('  ℹ Folder Scoping: disabled (no API_FOLDERS_* env vars)');
+  console.log("  ℹ Folder Scoping: disabled (no API_FOLDERS_* env vars)");
 }
 
-console.log('');
+console.log("");
 
 // List vaults
-app.get('/vaults', async (c: Context) => {
+app.get("/vaults", async (c: Context) => {
   try {
     const vaults = await listVaults();
     return c.json({ vaults });
   } catch (error) {
     return c.json(
-      { error: error instanceof Error ? error.message : 'Failed to list vaults' },
-      500
+      {
+        error: error instanceof Error ? error.message : "Failed to list vaults",
+      },
+      500,
     );
   }
 });
 
 // Get secret by name
-app.get('/secret/:name', async (c: Context) => {
-  const name = decodeURIComponent(c.req.param('name'));
-  const vault = c.req.query('vault') || 'default';
-  const clientId = c.get('clientId') as string | undefined;
+app.get("/secret/:name", async (c: Context) => {
+  const name = decodeURIComponent(c.req.param("name"));
+  const vault = c.req.query("vault") || "default";
+  const clientId = c.get("clientId") as string | undefined;
 
   // Folder scope check
   if (clientId && !folderScope.isAllowed(clientId, name)) {
-    return c.json({ error: 'Secret not found' }, 404);
+    return c.json({ error: "Secret not found" }, 404);
   }
 
   try {
@@ -201,38 +225,38 @@ app.get('/secret/:name', async (c: Context) => {
     return c.json({ value });
   } catch (error) {
     return c.json(
-      { error: error instanceof Error ? error.message : 'Secret not found' },
-      404
+      { error: error instanceof Error ? error.message : "Secret not found" },
+      404,
     );
   }
 });
 
 // Get all fields for a secret
-app.get('/secret/:name/fields', async (c: Context) => {
-  const name = decodeURIComponent(c.req.param('name'));
-  const vault = c.req.query('vault') || 'default';
-  const clientId = c.get('clientId') as string | undefined;
+app.get("/secret/:name/fields", async (c: Context) => {
+  const name = decodeURIComponent(c.req.param("name"));
+  const vault = c.req.query("vault") || "default";
+  const clientId = c.get("clientId") as string | undefined;
 
   // Folder scope check
   if (clientId && !folderScope.isAllowed(clientId, name)) {
-    return c.json({ error: 'Item not found' }, 404);
+    return c.json({ error: "Item not found" }, 404);
   }
 
   try {
     const fields = await getSecretObject(name, { vault });
     return c.json({ name, fields });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Item not found';
-    const status = message.includes('locked') ? 503 : 404;
+    const message = error instanceof Error ? error.message : "Item not found";
+    const status = message.includes("locked") ? 503 : 404;
     return c.json({ error: message }, status);
   }
 });
 
 // List secrets with optional filter
-app.get('/secrets', async (c: Context) => {
-  const filter = c.req.query('filter');
-  const vault = c.req.query('vault') || 'default';
-  const clientId = c.get('clientId') as string | undefined;
+app.get("/secrets", async (c: Context) => {
+  const filter = c.req.query("filter");
+  const vault = c.req.query("vault") || "default";
+  const clientId = c.get("clientId") as string | undefined;
 
   try {
     let secrets = await listSecrets(filter || undefined, { vault });
@@ -244,22 +268,23 @@ app.get('/secrets', async (c: Context) => {
 
     return c.json({ secrets, count: secrets.length });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to list secrets';
-    const status = message.includes('locked') ? 503 : 500;
+    const message =
+      error instanceof Error ? error.message : "Failed to list secrets";
+    const status = message.includes("locked") ? 503 : 500;
     return c.json({ error: message }, status);
   }
 });
 
 // Fuzzy search secrets
-app.get('/secrets/search', async (c: Context) => {
-  const query = c.req.query('q');
+app.get("/secrets/search", async (c: Context) => {
+  const query = c.req.query("q");
   if (!query) {
-    return c.json({ error: 'Missing required query parameter: q' }, 400);
+    return c.json({ error: "Missing required query parameter: q" }, 400);
   }
 
-  const vault = c.req.query('vault') || 'default';
-  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100);
-  const clientId = c.get('clientId') as string | undefined;
+  const vault = c.req.query("vault") || "default";
+  const limit = Math.min(parseInt(c.req.query("limit") || "20", 10), 100);
+  const clientId = c.get("clientId") as string | undefined;
 
   try {
     let secrets = await listSecrets(undefined, { vault });
@@ -295,118 +320,125 @@ app.get('/secrets/search', async (c: Context) => {
 
     return c.json({ results: scored, query, count: scored.length });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Search failed';
-    const status = message.includes('locked') ? 503 : 500;
+    const message = error instanceof Error ? error.message : "Search failed";
+    const status = message.includes("locked") ? 503 : 500;
     return c.json({ error: message }, status);
   }
 });
 
 // Cache stats
-app.get('/cache/stats', (c: Context) => {
+app.get("/cache/stats", (c: Context) => {
   const stats = getCacheStats();
   return c.json({ cache: stats });
 });
 
 // Clear cache (also refreshes folder scope mappings)
-app.post('/cache/clear', async (c: Context) => {
-  const vault = c.req.query('vault');
+app.post("/cache/clear", async (c: Context) => {
+  const vault = c.req.query("vault");
   await clearCache(vault || undefined);
   await folderScope.refresh();
-  return c.json({ cleared: true, vault: vault || 'all' });
+  return c.json({ cleared: true, vault: vault || "all" });
 });
 
 // Get snapshot metadata
-app.get('/snapshot/info', async (c: Context) => {
+app.get("/snapshot/info", async (c: Context) => {
   const metadata = await snapshotManager.getMetadata();
   if (!metadata) {
-    return c.json({ error: 'No snapshot found' }, 404);
+    return c.json({ error: "No snapshot found" }, 404);
   }
   return c.json({ metadata });
 });
 
 // Create new snapshot
-app.post('/snapshot/create', async (c: Context) => {
-  const session = await getVaultSession('default');
+app.post("/snapshot/create", async (c: Context) => {
+  const session = await getVaultSession("default");
   if (!session) {
-    return c.json({ error: 'No vault session. Run: bw unlock' }, 503);
+    return c.json({ error: "No vault session. Run: bw unlock" }, 503);
   }
 
   try {
-    const metadata = await snapshotManager.createSnapshot('default', session);
+    const metadata = await snapshotManager.createSnapshot("default", session);
     return c.json({ created: true, metadata });
   } catch (error) {
     return c.json(
-      { error: error instanceof Error ? error.message : 'Snapshot creation failed' },
-      500
+      {
+        error:
+          error instanceof Error ? error.message : "Snapshot creation failed",
+      },
+      500,
     );
   }
 });
 
 // Return 405 for unsupported methods on valid paths
 const methodNotAllowed = (c: Context) => {
-  return c.json(
-    { error: 'Method not allowed', allowed: ['GET'] },
-    405
-  );
+  return c.json({ error: "Method not allowed", allowed: ["GET"] }, 405);
 };
 
-app.post('/health', methodNotAllowed);
-app.put('/health', methodNotAllowed);
-app.delete('/health', methodNotAllowed);
-app.patch('/health', methodNotAllowed);
+app.post("/health", methodNotAllowed);
+app.put("/health", methodNotAllowed);
+app.delete("/health", methodNotAllowed);
+app.patch("/health", methodNotAllowed);
 
-app.post('/vaults', methodNotAllowed);
-app.put('/vaults', methodNotAllowed);
-app.delete('/vaults', methodNotAllowed);
-app.patch('/vaults', methodNotAllowed);
+app.post("/vaults", methodNotAllowed);
+app.put("/vaults", methodNotAllowed);
+app.delete("/vaults", methodNotAllowed);
+app.patch("/vaults", methodNotAllowed);
 
-app.post('/secret/:name', methodNotAllowed);
-app.put('/secret/:name', methodNotAllowed);
-app.delete('/secret/:name', methodNotAllowed);
-app.patch('/secret/:name', methodNotAllowed);
+app.post("/secret/:name", methodNotAllowed);
+app.put("/secret/:name", methodNotAllowed);
+app.delete("/secret/:name", methodNotAllowed);
+app.patch("/secret/:name", methodNotAllowed);
 
-app.post('/secret/:name/fields', methodNotAllowed);
-app.put('/secret/:name/fields', methodNotAllowed);
-app.delete('/secret/:name/fields', methodNotAllowed);
-app.patch('/secret/:name/fields', methodNotAllowed);
+app.post("/secret/:name/fields", methodNotAllowed);
+app.put("/secret/:name/fields", methodNotAllowed);
+app.delete("/secret/:name/fields", methodNotAllowed);
+app.patch("/secret/:name/fields", methodNotAllowed);
 
-app.post('/secrets', methodNotAllowed);
-app.put('/secrets', methodNotAllowed);
-app.delete('/secrets', methodNotAllowed);
-app.patch('/secrets', methodNotAllowed);
+app.post("/secrets", methodNotAllowed);
+app.put("/secrets", methodNotAllowed);
+app.delete("/secrets", methodNotAllowed);
+app.patch("/secrets", methodNotAllowed);
 
-app.post('/secrets/search', methodNotAllowed);
-app.put('/secrets/search', methodNotAllowed);
-app.delete('/secrets/search', methodNotAllowed);
-app.patch('/secrets/search', methodNotAllowed);
+app.post("/secrets/search", methodNotAllowed);
+app.put("/secrets/search", methodNotAllowed);
+app.delete("/secrets/search", methodNotAllowed);
+app.patch("/secrets/search", methodNotAllowed);
 
-app.post('/cache/stats', methodNotAllowed);
-app.put('/cache/stats', methodNotAllowed);
-app.delete('/cache/stats', methodNotAllowed);
-app.patch('/cache/stats', methodNotAllowed);
+app.post("/cache/stats", methodNotAllowed);
+app.put("/cache/stats", methodNotAllowed);
+app.delete("/cache/stats", methodNotAllowed);
+app.patch("/cache/stats", methodNotAllowed);
 
-app.put('/cache/clear', methodNotAllowed);
-app.delete('/cache/clear', methodNotAllowed);
-app.patch('/cache/clear', methodNotAllowed);
+app.put("/cache/clear", methodNotAllowed);
+app.delete("/cache/clear", methodNotAllowed);
+app.patch("/cache/clear", methodNotAllowed);
 
-app.post('/snapshot/info', methodNotAllowed);
-app.put('/snapshot/info', methodNotAllowed);
-app.delete('/snapshot/info', methodNotAllowed);
-app.patch('/snapshot/info', methodNotAllowed);
+app.post("/snapshot/info", methodNotAllowed);
+app.put("/snapshot/info", methodNotAllowed);
+app.delete("/snapshot/info", methodNotAllowed);
+app.patch("/snapshot/info", methodNotAllowed);
 
-app.put('/snapshot/create', methodNotAllowed);
-app.delete('/snapshot/create', methodNotAllowed);
-app.patch('/snapshot/create', methodNotAllowed);
+app.put("/snapshot/create", methodNotAllowed);
+app.delete("/snapshot/create", methodNotAllowed);
+app.patch("/snapshot/create", methodNotAllowed);
 
 // Start server
-const port = parseInt(process.env.PORT || '3000', 10);
-const host = process.env.HOST || '0.0.0.0';
+const port = parseInt(process.env.PORT || "3000", 10);
+const host = process.env.HOST || "0.0.0.0";
 
-console.log(`Starting server on ${host}:${port}...`);
-console.log('');
+// Encrypted ingress (issue #14): enable TLS when TLS_CERT/TLS_KEY provided;
+// fail closed if VW_REQUIRE_TLS=1 without a cert.
+const tls = resolveIngressTls("rest");
+
+console.log(
+  `Starting server on ${tls ? "https" : "http"}://${host}:${port}...`,
+);
+console.log("");
 
 export default {
   port,
   hostname: host,
   fetch: app.fetch,
+  ...(tls ? { tls } : {}),
 };

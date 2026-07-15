@@ -21,43 +21,58 @@
  * @module server/mcp
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { $ } from 'bun';
-import { z } from 'zod';
-import { getSecret, getSecretObject, listSecrets } from '../index';
-import { snapshotManager, type BitwVaultItem } from '../snapshot';
-import { getVaultSession } from '../keychain';
-import { loadBearerTokens } from './middleware/bearer-auth';
-import { getProfile } from './profiles';
-import { resolveService } from './service-resolver';
-import { buildCreateTemplate, mergeUpdateFields, bwCreateItem, bwGetItem, bwEditItem, bwDeleteItem } from './vault-client';
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { $ } from "bun";
+import { z } from "zod";
+import { getSecret, getSecretObject, listSecrets } from "../index";
+import { snapshotManager, type BitwVaultItem } from "../snapshot";
+import { getVaultSession } from "../keychain";
+import { loadBearerTokens } from "./middleware/bearer-auth";
+import { resolveIdentity } from "./middleware/workload-identity";
+import { resolveIngressTls } from "./utils/tls";
+import { getProfile } from "./profiles";
+import { resolveService } from "./service-resolver";
+import {
+  buildCreateTemplate,
+  mergeUpdateFields,
+  bwCreateItem,
+  bwGetItem,
+  bwEditItem,
+  bwDeleteItem,
+} from "./vault-client";
 
 // ============================================================================
 // Auth helper
 // ============================================================================
 
+// Legacy per-client bearer tokens remain valid during migration; new opaque
+// vwsk_ workload tokens for audience "mcp" are additive (issue #15).
 const tokens = loadBearerTokens();
 if (tokens.size === 0) {
-  console.error('MCP: No API tokens configured. Set API_TOKEN_<CLIENT>=<token>');
-  process.exit(1);
+  console.warn(
+    "MCP: No legacy API tokens configured (workload-identity tokens still accepted)",
+  );
 }
 
-function authenticateRequest(req: Request): string | null {
-  const authHeader = req.headers.get('Authorization');
-  if (!authHeader) return null;
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) return null;
-  return tokens.get(match[1]) ?? null;
+/**
+ * Resolve a raw MCP request to a subject/clientId. Fail-closed: null on any
+ * invalid credential. Same decision as the REST/proxy workloadIdentity path.
+ */
+async function authenticateRequest(req: Request): Promise<string | null> {
+  const authHeader = req.headers.get("Authorization");
+  const match = authHeader?.match(/^Bearer\s+(.+)$/i);
+  const token = match ? match[1] : null;
+  return resolveIdentity(token, { audience: "mcp", legacyTokens: tokens });
 }
 
 // ============================================================================
 // Security profile + folder scoping
 // ============================================================================
 
-const SECURITY_PROFILE = process.env.SECURITY_PROFILE || 'im-aware';
+const SECURITY_PROFILE = process.env.SECURITY_PROFILE || "im-aware";
 const profile = getProfile(SECURITY_PROFILE);
 
 /** Resolved folder IDs the MCP is allowed to access. null = unrestricted. */
@@ -68,33 +83,44 @@ let writeFolderId: string | null = null;
 async function initProfileFolderScope(): Promise<void> {
   if (!profile.folderScope?.length) return;
 
-  const session = await getVaultSession('default');
+  const session = await getVaultSession("default");
   if (!session) {
-    console.warn('  ⚠  MCP FolderScope: No vault session, scoping disabled');
+    console.warn("  ⚠  MCP FolderScope: No vault session, scoping disabled");
     return;
   }
 
   try {
-    const foldersResult = await $`BW_SESSION=${session} bw list folders`.quiet();
-    const folders: Array<{ id: string; name: string }> = JSON.parse(foldersResult.text());
+    const foldersResult =
+      await $`BW_SESSION=${session} bw list folders`.quiet();
+    const folders: Array<{ id: string; name: string }> = JSON.parse(
+      foldersResult.text(),
+    );
 
     allowedFolderIds = new Set();
     for (const scopeName of profile.folderScope) {
-      const folder = folders.find(f => f.name.toLowerCase() === scopeName.toLowerCase());
+      const folder = folders.find(
+        (f) => f.name.toLowerCase() === scopeName.toLowerCase(),
+      );
       if (folder) {
         allowedFolderIds.add(folder.id);
         if (!writeFolderId) writeFolderId = folder.id;
       } else {
-        console.warn(`  ⚠  MCP FolderScope: Folder "${scopeName}" not found in vault`);
+        console.warn(
+          `  ⚠  MCP FolderScope: Folder "${scopeName}" not found in vault`,
+        );
       }
     }
 
     if (allowedFolderIds.size === 0) {
-      console.warn('  ⚠  MCP FolderScope: No folders resolved, scoping disabled');
+      console.warn(
+        "  ⚠  MCP FolderScope: No folders resolved, scoping disabled",
+      );
       allowedFolderIds = null;
     }
   } catch (error) {
-    console.warn(`  ⚠  MCP FolderScope: Init failed — ${error instanceof Error ? error.message : error}`);
+    console.warn(
+      `  ⚠  MCP FolderScope: Init failed — ${error instanceof Error ? error.message : error}`,
+    );
   }
 }
 
@@ -117,7 +143,7 @@ async function filterByScope(names: string[]): Promise<string[]> {
   for (const item of snapshot.items) {
     if (isItemAllowed(item)) allowedNames.add(item.name);
   }
-  return names.filter(n => allowedNames.has(n));
+  return names.filter((n) => allowedNames.has(n));
 }
 
 /** Find an item in the snapshot, respecting folder scope */
@@ -131,9 +157,12 @@ async function findScopedItem(name: string): Promise<BitwVaultItem | null> {
 // Tool result helpers
 // ============================================================================
 
-const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
+const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const json = (obj: unknown) => text(JSON.stringify(obj, null, 2));
-const err = (msg: string) => ({ content: [{ type: 'text' as const, text: msg }], isError: true as const });
+const err = (msg: string) => ({
+  content: [{ type: "text" as const, text: msg }],
+  isError: true as const,
+});
 
 // ============================================================================
 // MCP Server factory
@@ -141,8 +170,8 @@ const err = (msg: string) => ({ content: [{ type: 'text' as const, text: msg }],
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
-    name: 'vaultwarden-secrets',
-    version: '0.7.0',
+    name: "vaultwarden-secrets",
+    version: "0.7.0",
   });
 
   // ------------------------------------------------------------------
@@ -150,11 +179,11 @@ function createMcpServer(): McpServer {
   // ------------------------------------------------------------------
 
   server.tool(
-    'search_secrets',
-    'Fuzzy search for secrets by name',
+    "search_secrets",
+    "Fuzzy search for secrets by name",
     {
-      query: z.string().describe('Search query'),
-      limit: z.number().optional().default(20).describe('Max results'),
+      query: z.string().describe("Search query"),
+      limit: z.number().optional().default(20).describe("Max results"),
       vault: z.string().optional().describe('Vault ID (default: "default")'),
     },
     { readOnlyHint: true },
@@ -170,7 +199,10 @@ function createMcpServer(): McpServer {
             let score = 0;
             let queryIdx = 0;
             for (const char of lowerName) {
-              if (queryIdx < lowerQuery.length && char === lowerQuery[queryIdx]) {
+              if (
+                queryIdx < lowerQuery.length &&
+                char === lowerQuery[queryIdx]
+              ) {
                 score += 10;
                 queryIdx++;
               }
@@ -185,60 +217,79 @@ function createMcpServer(): McpServer {
 
         return json(scored);
       } catch (error) {
-        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-    }
+    },
   );
 
   server.tool(
-    'get_secret',
-    'Get a secret value by name',
+    "get_secret",
+    "Get a secret value by name",
     {
-      name: z.string().describe('Secret name or path (e.g. "github-pat", "github-pat.login.password")'),
+      name: z
+        .string()
+        .describe(
+          'Secret name or path (e.g. "github-pat", "github-pat.login.password")',
+        ),
       vault: z.string().optional().describe('Vault ID (default: "default")'),
     },
     { readOnlyHint: true },
     async ({ name, vault }) => {
       try {
-        const baseName = name.split('.')[0] || name;
+        const baseName = name.split(".")[0] || name;
         const item = await findScopedItem(baseName);
-        if (!item) return err(`Error: Secret "${baseName}" not found or not in allowed folder scope`);
+        if (!item)
+          return err(
+            `Error: Secret "${baseName}" not found or not in allowed folder scope`,
+          );
 
         const value = await getSecret(name, { vault });
         return text(value);
       } catch (error) {
-        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-    }
+    },
   );
 
   server.tool(
-    'get_secret_fields',
-    'Get all fields for a secret item',
+    "get_secret_fields",
+    "Get all fields for a secret item",
     {
-      name: z.string().describe('Secret item name'),
-      vault: z.string().optional().describe('Vault ID'),
+      name: z.string().describe("Secret item name"),
+      vault: z.string().optional().describe("Vault ID"),
     },
     { readOnlyHint: true },
     async ({ name, vault }) => {
       try {
         const item = await findScopedItem(name);
-        if (!item) return err(`Error: Secret "${name}" not found or not in allowed folder scope`);
+        if (!item)
+          return err(
+            `Error: Secret "${name}" not found or not in allowed folder scope`,
+          );
 
         const fields = await getSecretObject(name, { vault });
         return json(fields);
       } catch (error) {
-        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-    }
+    },
   );
 
   server.tool(
-    'list_secrets',
-    'List available secrets with optional filter',
+    "list_secrets",
+    "List available secrets with optional filter",
     {
-      filter: z.string().optional().describe('Filter string (case-insensitive)'),
-      vault: z.string().optional().describe('Vault ID'),
+      filter: z
+        .string()
+        .optional()
+        .describe("Filter string (case-insensitive)"),
+      vault: z.string().optional().describe("Vault ID"),
     },
     { readOnlyHint: true },
     async ({ filter, vault }) => {
@@ -247,51 +298,64 @@ function createMcpServer(): McpServer {
         secrets = await filterByScope(secrets);
         return json(secrets);
       } catch (error) {
-        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-    }
+    },
   );
 
   server.tool(
-    'snapshot_info',
-    'Get vault snapshot metadata (age, item count, staleness)',
+    "snapshot_info",
+    "Get vault snapshot metadata (age, item count, staleness)",
     {},
     { readOnlyHint: true },
     async () => {
       try {
         const metadata = await snapshotManager.getMetadata();
-        if (!metadata) return text('No snapshot exists');
+        if (!metadata) return text("No snapshot exists");
         return json(metadata);
       } catch (error) {
-        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-    }
+    },
   );
 
   server.tool(
-    'get_service',
-    'Get all vault items for a service (API credentials + per-host entries). Uses naming convention: SERVICE_API for shared credentials, service01/02/etc for hosts.',
+    "get_service",
+    "Get all vault items for a service (API credentials + per-host entries). Uses naming convention: SERVICE_API for shared credentials, service01/02/etc for hosts.",
     {
-      service: z.string().describe('Service name prefix (e.g. "proxmox", "redis", "github")'),
+      service: z
+        .string()
+        .describe('Service name prefix (e.g. "proxmox", "redis", "github")'),
     },
     { readOnlyHint: true },
     async ({ service }) => {
       try {
         const snapshot = await snapshotManager.load();
-        if (!snapshot) return err('Error: No snapshot available. Run refresh_snapshot first.');
+        if (!snapshot)
+          return err(
+            "Error: No snapshot available. Run refresh_snapshot first.",
+          );
 
         const allowedItems = snapshot.items.filter(isItemAllowed);
         const result = resolveService(service, allowedItems);
 
         if (result.itemCount === 0) {
-          return err(`No items found for service "${service}". Check the service name or folder scope.`);
+          return err(
+            `No items found for service "${service}". Check the service name or folder scope.`,
+          );
         }
 
         return json(result);
       } catch (error) {
-        return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-    }
+    },
   );
 
   // ------------------------------------------------------------------
@@ -300,121 +364,213 @@ function createMcpServer(): McpServer {
 
   if (profile.allowWrites) {
     server.tool(
-      'refresh_snapshot',
-      'Force a snapshot refresh from the live vault. Use when snapshot_info shows stale data.',
+      "refresh_snapshot",
+      "Force a snapshot refresh from the live vault. Use when snapshot_info shows stale data.",
       {},
       { readOnlyHint: false, idempotentHint: true },
       async () => {
         try {
-          const session = await getVaultSession('default');
-          if (!session) return err('Error: No vault session available. Run: bw unlock');
+          const session = await getVaultSession("default");
+          if (!session)
+            return err("Error: No vault session available. Run: bw unlock");
 
-          const metadata = await snapshotManager.createSnapshot('default', session);
+          const metadata = await snapshotManager.createSnapshot(
+            "default",
+            session,
+          );
           return json({ refreshed: true, ...metadata });
         } catch (error) {
-          return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+          return err(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      }
+      },
     );
 
     server.tool(
-      'create_secret',
-      'Create a new secret in the vault (Infrastructure folder). Supports login items (type 1) and secure notes (type 2) with custom fields. Triggers snapshot refresh after creation.',
+      "create_secret",
+      "Create a new secret in the vault (Infrastructure folder). Supports login items (type 1) and secure notes (type 2) with custom fields. Triggers snapshot refresh after creation.",
       {
-        name: z.string().describe('Name for the new secret'),
-        type: z.number().optional().describe('Item type: 1=login (default), 2=secure note. Use type 2 with custom fields for API tokens.'),
-        username: z.string().optional().describe('Login username (type 1 only)'),
-        password: z.string().optional().describe('Login password (type 1 only)'),
-        uri: z.string().optional().describe('Login URI (type 1 only, e.g. https://example.com)'),
-        notes: z.string().optional().describe('Notes field'),
-        fields: z.array(z.object({
-          name: z.string().describe('Field name'),
-          value: z.string().describe('Field value'),
-          type: z.number().optional().describe('Field type: 0=text (default), 1=hidden'),
-        })).optional().describe('Custom fields (e.g. API tokens on secure notes)'),
+        name: z.string().describe("Name for the new secret"),
+        type: z
+          .number()
+          .optional()
+          .describe(
+            "Item type: 1=login (default), 2=secure note. Use type 2 with custom fields for API tokens.",
+          ),
+        username: z
+          .string()
+          .optional()
+          .describe("Login username (type 1 only)"),
+        password: z
+          .string()
+          .optional()
+          .describe("Login password (type 1 only)"),
+        uri: z
+          .string()
+          .optional()
+          .describe("Login URI (type 1 only, e.g. https://example.com)"),
+        notes: z.string().optional().describe("Notes field"),
+        fields: z
+          .array(
+            z.object({
+              name: z.string().describe("Field name"),
+              value: z.string().describe("Field value"),
+              type: z
+                .number()
+                .optional()
+                .describe("Field type: 0=text (default), 1=hidden"),
+            }),
+          )
+          .optional()
+          .describe("Custom fields (e.g. API tokens on secure notes)"),
       },
       { destructiveHint: false, idempotentHint: false },
       async ({ name, type, username, password, uri, notes, fields }) => {
         try {
-          if (!writeFolderId) return err('Error: No write folder configured. Check folderScope in security profile.');
+          if (!writeFolderId)
+            return err(
+              "Error: No write folder configured. Check folderScope in security profile.",
+            );
 
-          const session = await getVaultSession('default');
-          if (!session) return err('Error: No vault session available. Run: bw unlock');
+          const session = await getVaultSession("default");
+          if (!session)
+            return err("Error: No vault session available. Run: bw unlock");
 
-          const template = buildCreateTemplate({ name, type, folderId: writeFolderId, username, password, uri, notes, fields });
+          const template = buildCreateTemplate({
+            name,
+            type,
+            folderId: writeFolderId,
+            username,
+            password,
+            uri,
+            notes,
+            fields,
+          });
           const created = await bwCreateItem(session, template);
 
-          await snapshotManager.createSnapshot('default', session);
+          await snapshotManager.createSnapshot("default", session);
 
           return json({ created: true, id: created.id, name: created.name });
         } catch (error) {
-          return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+          return err(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      }
+      },
     );
 
     server.tool(
-      'update_secret',
-      'Update an existing secret. Supports login fields and custom fields. Only secrets in allowed folders can be modified. Triggers snapshot refresh.',
+      "update_secret",
+      "Update an existing secret. Supports login fields and custom fields. Only secrets in allowed folders can be modified. Triggers snapshot refresh.",
       {
-        name: z.string().describe('Name of the secret to update'),
-        username: z.string().optional().describe('New username (omit to keep current)'),
-        password: z.string().optional().describe('New password (omit to keep current)'),
-        uri: z.string().optional().describe('New URI (omit to keep current)'),
-        notes: z.string().optional().describe('New notes (omit to keep current)'),
-        fields: z.array(z.object({
-          name: z.string().describe('Field name'),
-          value: z.string().describe('Field value'),
-          type: z.number().optional().describe('Field type: 0=text (default), 1=hidden'),
-        })).optional().describe('Custom fields to add/update'),
-        fieldStrategy: z.enum(['merge', 'replace']).optional().describe("'merge' (default): update existing fields by name, append new. 'replace': overwrite all fields."),
+        name: z.string().describe("Name of the secret to update"),
+        username: z
+          .string()
+          .optional()
+          .describe("New username (omit to keep current)"),
+        password: z
+          .string()
+          .optional()
+          .describe("New password (omit to keep current)"),
+        uri: z.string().optional().describe("New URI (omit to keep current)"),
+        notes: z
+          .string()
+          .optional()
+          .describe("New notes (omit to keep current)"),
+        fields: z
+          .array(
+            z.object({
+              name: z.string().describe("Field name"),
+              value: z.string().describe("Field value"),
+              type: z
+                .number()
+                .optional()
+                .describe("Field type: 0=text (default), 1=hidden"),
+            }),
+          )
+          .optional()
+          .describe("Custom fields to add/update"),
+        fieldStrategy: z
+          .enum(["merge", "replace"])
+          .optional()
+          .describe(
+            "'merge' (default): update existing fields by name, append new. 'replace': overwrite all fields.",
+          ),
       },
       { destructiveHint: true, idempotentHint: true },
-      async ({ name, username, password, uri, notes, fields, fieldStrategy }) => {
+      async ({
+        name,
+        username,
+        password,
+        uri,
+        notes,
+        fields,
+        fieldStrategy,
+      }) => {
         try {
-          const session = await getVaultSession('default');
-          if (!session) return err('Error: No vault session available. Run: bw unlock');
+          const session = await getVaultSession("default");
+          if (!session)
+            return err("Error: No vault session available. Run: bw unlock");
 
           const item = await findScopedItem(name);
-          if (!item) return err(`Error: Secret "${name}" not found or not in allowed folder scope`);
+          if (!item)
+            return err(
+              `Error: Secret "${name}" not found or not in allowed folder scope`,
+            );
 
           const fullItem = await bwGetItem(session, item.id);
-          const merged = mergeUpdateFields(fullItem, { username, password, uri, notes, fields, fieldStrategy });
+          const merged = mergeUpdateFields(fullItem, {
+            username,
+            password,
+            uri,
+            notes,
+            fields,
+            fieldStrategy,
+          });
           await bwEditItem(session, item.id, merged);
 
-          await snapshotManager.createSnapshot('default', session);
+          await snapshotManager.createSnapshot("default", session);
 
           return json({ updated: true, id: item.id, name: item.name });
         } catch (error) {
-          return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+          return err(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      }
+      },
     );
 
     server.tool(
-      'delete_secret',
-      'Delete a secret from the vault. Only secrets in allowed folders can be deleted. Triggers snapshot refresh.',
+      "delete_secret",
+      "Delete a secret from the vault. Only secrets in allowed folders can be deleted. Triggers snapshot refresh.",
       {
-        name: z.string().describe('Name of the secret to delete'),
+        name: z.string().describe("Name of the secret to delete"),
       },
       { destructiveHint: true, idempotentHint: false },
       async ({ name }) => {
         try {
-          const session = await getVaultSession('default');
-          if (!session) return err('Error: No vault session available. Run: bw unlock');
+          const session = await getVaultSession("default");
+          if (!session)
+            return err("Error: No vault session available. Run: bw unlock");
 
           const item = await findScopedItem(name);
-          if (!item) return err(`Error: Secret "${name}" not found or not in allowed folder scope`);
+          if (!item)
+            return err(
+              `Error: Secret "${name}" not found or not in allowed folder scope`,
+            );
 
           await bwDeleteItem(session, item.id);
 
-          await snapshotManager.createSnapshot('default', session);
+          await snapshotManager.createSnapshot("default", session);
 
           return json({ deleted: true, id: item.id, name: item.name });
         } catch (error) {
-          return err(`Error: ${error instanceof Error ? error.message : String(error)}`);
+          return err(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      }
+      },
     );
   }
 
@@ -423,30 +579,33 @@ function createMcpServer(): McpServer {
   // ------------------------------------------------------------------
 
   const toolList = [
-    'search_secrets', 'get_secret', 'get_secret_fields', 'list_secrets', 'snapshot_info', 'get_service',
-    ...(profile.allowWrites ? ['refresh_snapshot', 'create_secret', 'update_secret', 'delete_secret'] : []),
+    "search_secrets",
+    "get_secret",
+    "get_secret_fields",
+    "list_secrets",
+    "snapshot_info",
+    "get_service",
+    ...(profile.allowWrites
+      ? ["refresh_snapshot", "create_secret", "update_secret", "delete_secret"]
+      : []),
   ];
 
-  server.resource(
-    'server-info',
-    'vaultwarden://info',
-    async () => ({
-      contents: [
-        {
-          uri: 'vaultwarden://info',
-          mimeType: 'application/json',
-          text: JSON.stringify({
-            name: 'vaultwarden-secrets',
-            version: '0.7.0',
-            profile: profile.name,
-            folderScope: profile.folderScope || [],
-            allowWrites: profile.allowWrites || false,
-            tools: toolList,
-          }),
-        },
-      ],
-    })
-  );
+  server.resource("server-info", "vaultwarden://info", async () => ({
+    contents: [
+      {
+        uri: "vaultwarden://info",
+        mimeType: "application/json",
+        text: JSON.stringify({
+          name: "vaultwarden-secrets",
+          version: "0.7.0",
+          profile: profile.name,
+          folderScope: profile.folderScope || [],
+          allowWrites: profile.allowWrites || false,
+          tools: toolList,
+        }),
+      },
+    ],
+  }));
 
   return server;
 }
@@ -456,10 +615,14 @@ function createMcpServer(): McpServer {
 // ============================================================================
 
 const app = new Hono();
-app.use('*', cors());
+app.use("*", cors());
 
-app.get('/health', (c) =>
-  c.json({ status: 'ok', transport: 'mcp-streamable-http', timestamp: new Date().toISOString() })
+app.get("/health", (c) =>
+  c.json({
+    status: "ok",
+    transport: "mcp-streamable-http",
+    timestamp: new Date().toISOString(),
+  }),
 );
 
 const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
@@ -469,7 +632,9 @@ const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
  * and store in the transports map. Used for both explicit init requests and
  * auto-reconnection when a client sends a stale session ID.
  */
-async function createInitializedTransport(requestUrl: string): Promise<WebStandardStreamableHTTPServerTransport> {
+async function createInitializedTransport(
+  requestUrl: string,
+): Promise<WebStandardStreamableHTTPServerTransport> {
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
     enableJsonResponse: true,
@@ -486,28 +651,33 @@ async function createInitializedTransport(requestUrl: string): Promise<WebStanda
 
   // Synthesize initialize handshake so the server is ready for tool calls
   const initBody = {
-    jsonrpc: '2.0', id: '_auto_init', method: 'initialize',
+    jsonrpc: "2.0",
+    id: "_auto_init",
+    method: "initialize",
     params: {
-      protocolVersion: '2025-03-26',
+      protocolVersion: "2025-03-26",
       capabilities: {},
-      clientInfo: { name: 'auto-reconnect', version: '1.0' },
+      clientInfo: { name: "auto-reconnect", version: "1.0" },
     },
   };
   const initReq = new Request(requestUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
     body: JSON.stringify(initBody),
   });
   await transport.handleRequest(initReq, { parsedBody: initBody });
 
   // Complete handshake with initialized notification
-  const notifBody = { jsonrpc: '2.0', method: 'notifications/initialized' };
+  const notifBody = { jsonrpc: "2.0", method: "notifications/initialized" };
   const notifReq = new Request(requestUrl, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-      'mcp-session-id': transport.sessionId!,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      "mcp-session-id": transport.sessionId!,
     },
     body: JSON.stringify(notifBody),
   });
@@ -520,21 +690,22 @@ async function createInitializedTransport(requestUrl: string): Promise<WebStanda
   return transport;
 }
 
-app.all('/mcp', async (c) => {
-  const clientId = authenticateRequest(c.req.raw);
+app.all("/mcp", async (c) => {
+  const clientId = await authenticateRequest(c.req.raw);
   if (!clientId) {
-    return c.json({ error: 'Unauthorized' }, 401);
+    return c.json({ error: "Unauthorized" }, 401);
   }
 
-  if (c.req.method === 'POST') {
+  if (c.req.method === "POST") {
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
-      return c.json({ error: 'Invalid JSON' }, 400);
+      return c.json({ error: "Invalid JSON" }, 400);
     }
 
-    const isInit = !Array.isArray(body) && (body as any)?.method === 'initialize';
+    const isInit =
+      !Array.isArray(body) && (body as any)?.method === "initialize";
 
     if (isInit) {
       // Explicit init: create fresh transport and let the client's request do the handshake
@@ -548,24 +719,28 @@ app.all('/mcp', async (c) => {
       const mcpServer = createMcpServer();
       await mcpServer.connect(transport);
 
-      const response = await transport.handleRequest(c.req.raw, { parsedBody: body });
+      const response = await transport.handleRequest(c.req.raw, {
+        parsedBody: body,
+      });
       if (transport.sessionId) transports.set(transport.sessionId, transport);
       return response;
     }
 
     // Look up existing session, or auto-reconnect if stale/missing
-    const sessionId = c.req.header('mcp-session-id');
+    const sessionId = c.req.header("mcp-session-id");
     let transport = sessionId ? transports.get(sessionId) : undefined;
 
     if (!transport) {
-      console.log(`[MCP] Auto-reconnecting stale session ${sessionId ?? '(none)'}`);
+      console.log(
+        `[MCP] Auto-reconnecting stale session ${sessionId ?? "(none)"}`,
+      );
       transport = await createInitializedTransport(c.req.url);
 
       // Patch the request's session ID to match the new transport
       const headers = new Headers(c.req.raw.headers);
-      headers.set('mcp-session-id', transport.sessionId!);
+      headers.set("mcp-session-id", transport.sessionId!);
       const patched = new Request(c.req.raw.url, {
-        method: 'POST',
+        method: "POST",
         headers,
         body: JSON.stringify(body),
       });
@@ -576,9 +751,9 @@ app.all('/mcp', async (c) => {
   }
 
   // GET/DELETE — SSE streaming, no auto-reconnect
-  const sessionId = c.req.header('mcp-session-id');
+  const sessionId = c.req.header("mcp-session-id");
   if (!sessionId || !transports.has(sessionId)) {
-    return c.json({ error: 'Session not found. Re-initialize required.' }, 404);
+    return c.json({ error: "Session not found. Re-initialize required." }, 404);
   }
 
   return transports.get(sessionId)!.handleRequest(c.req.raw);
@@ -588,29 +763,36 @@ app.all('/mcp', async (c) => {
 // Start server
 // ============================================================================
 
-const port = parseInt(process.env.MCP_PORT || '3001', 10);
-const host = process.env.MCP_HOST || '0.0.0.0';
+const port = parseInt(process.env.MCP_PORT || "3001", 10);
+const host = process.env.MCP_HOST || "0.0.0.0";
 
-console.log('');
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log("");
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 console.log(`MCP Server: vaultwarden-secrets v0.7.0`);
 console.log(`Transport:  Streamable HTTP`);
 console.log(`Endpoint:   http://${host}:${port}/mcp`);
 console.log(`Auth:       Bearer token (${tokens.size} client(s))`);
 console.log(`Profile:    ${profile.name}`);
 if (profile.folderScope?.length) {
-  console.log(`Scoping:    ${profile.folderScope.join(', ')}`);
+  console.log(`Scoping:    ${profile.folderScope.join(", ")}`);
 }
 if (profile.allowWrites) {
-  console.log(`Writes:     Enabled (confirmation: ${profile.writeConfirmation ? 'required' : 'none'})`);
+  console.log(
+    `Writes:     Enabled (confirmation: ${profile.writeConfirmation ? "required" : "none"})`,
+  );
 } else {
   console.log(`Writes:     Disabled`);
 }
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-console.log('');
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+console.log("");
+
+// Encrypted ingress (issue #14): TLS when configured; fail-closed under
+// VW_REQUIRE_TLS=1. Must not change the MCP contract/port (still MCP_PORT).
+const tls = resolveIngressTls("mcp");
 
 export default {
   port,
   hostname: host,
   fetch: app.fetch,
+  ...(tls ? { tls } : {}),
 };
