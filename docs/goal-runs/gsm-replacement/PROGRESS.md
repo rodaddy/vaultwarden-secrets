@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Status: PR #24 has zero known review findings; the quota-bound GitGuardian Actions scan is being replaced by the repo-owned Betterleaks check.
-- Current phase: the active MCP baseline is restored; #13 implementation and its original review gates are complete, and the Betterleaks CI replacement is in validation/review; the #23 compatibility baseline remains the next implementation issue after an authorized merge.
+- Status: PR #24 has zero known review findings; the repo-owned Betterleaks `Secret Detection` check is green on the exact head.
+- Current phase: the active MCP baseline is restored; #13 implementation, review gates, and the Betterleaks CI replacement are validated; the deliberate merge decision remains pending, with #23 next after an authorized merge.
 - Control plane: this packet plus umbrella issue #12; no repository Project board currently exists.
 - Scope: greenfield internal control plane with compatibility-preserving migration from the active MCP service, Vaultwarden payload custody, and an independent non-secret control plane.
 
@@ -22,7 +22,7 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 ## Phase Checklist
 
 - [ ] Phase 0A: establish MCP compatibility baseline and cutover guard.
-- [ ] Phase 0B: #13 remove retired deploy trigger and prevent reactivation — PR #24 review fixes and verification in progress.
+- [ ] Phase 0B: #13 remove retired deploy trigger and prevent reactivation — PR #24 is green with merge pending.
 - [ ] Phase 0C: #14 hardened runtime and ingress envelope.
 - [ ] Phase 1A: #15 workload-identity transport.
 - [ ] Phase 1B: #16 metadata/reconciliation store.
@@ -45,6 +45,7 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 | 2026-07-14 | PR #24 review-fix validation | Retired installed unit moved to a root-only backup and systemd reloaded; unit path absent/inactive; port 3001, MCP service, and required timers active/enabled; ports 3000, 3002, and 3003 closed; non-secret `snapshot_info` current; focused test 3 passed; full suite 192 passed, 18 skipped, 0 failed; typecheck, ShellCheck, shell syntax, and diff check passed | Initial findings fixed; first focused verification found daemon-reload ordering and phase-label follow-ups |
 | 2026-07-14 | PR #24 terminal audit | Claude Opus high audited the pinned whole-PR patch at `c7c4fa6` | No P0/P1 and no same-root recurrence; one P2 contained-service restart path plus two supporting P3 findings require a fix and targeted verification |
 | 2026-07-14 | PR #24 terminal follow-up | Commit `3a2b00b` removed the port-3000/3003 restart path, added containment regression coverage, and corrected deploy documentation; pinned delta SHA-256 `b607d870239fc6724a5b6b9bbadf288e6f9fb3adcf81739541ffc4a9cf5ef500` | Targeted Sol-low verifier CLEAN; 4 focused tests passed; no same-root recurrence; terminal findings resolved |
+| 2026-07-14 | Betterleaks CI replacement | Betterleaks v1.6.1 checksum verified; `actionlint`, staged and exact-range scans, full typecheck, and 193-test suite passed; Ubuntu `Secret Detection` run `29380012247` passed on `992d339` | Two-lane focused review found and fixed the initial multi-commit branch push gap; fix-delta verifier returned CLEAN with no same-root recurrence |
 
 ## Blockers and Risks
 
@@ -56,4 +57,4 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 
 ## Handoff
 
-Next exact task: validate and review the Betterleaks workflow replacement, rerun the required check on the exact PR head, then make the deliberate merge decision. After authorized merge and #13 closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
+Next exact task: verify the final docs-only head and green checks, then make the deliberate merge decision. After authorized merge and #13 closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
