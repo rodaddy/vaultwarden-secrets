@@ -9,7 +9,7 @@
   "types": "index.ts",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/vaultwarden-secrets"
+    "url": "https://github.com/rodaddy/vaultwarden-secrets"
   },
   "keywords": [
     "vaultwarden",

@@ -138,7 +138,7 @@ The `install.sh` script can install Bun and the Bitwarden CLI for you (macOS and
 Clone the repo and install dependencies:
 
 ```bash
-git clone https://github.com/yourusername/vaultwarden-secrets
+git clone https://github.com/rodaddy/vaultwarden-secrets
 cd vaultwarden-secrets
 bun install
 ```
