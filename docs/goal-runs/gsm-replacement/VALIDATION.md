@@ -14,8 +14,8 @@ bun test <targeted-test-file>
 bun test
 bun run typecheck
 
-# Changed-content secret scan; select the repo-approved scanner invocation
-gitleaks git --redact=100 --log-opts='<base>..<head>'
+# Changed-content secret scan; use the same range contract as CI
+betterleaks git --redact=100 --no-banner --log-opts='<base>..<head>' .
 
 # Documentation/patch hygiene
 git diff --check -- docs/goal-runs/gsm-replacement
@@ -63,7 +63,7 @@ Only after all P0 acceptance, Full-tier review, exact local validation, and cont
 
 ## No-Secret Evidence
 
-- Gitleaks passes on the exact changed commit range with full redaction.
+- Betterleaks passes on the exact changed commit range with full redaction and validation disabled.
 - Tests use synthetic canaries, never production-shaped credentials.
 - Logs and audit fixtures assert absence of payload, token, session, private-key, and credential fields.
 - Metadata schema rejects payload-bearing fields; database inspection reports schema/key names and counts only.

@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Status: PR #24 has zero known review findings; the required GitGuardian Actions check is blocked by an invalid repository API key.
-- Current phase: the active MCP baseline is restored; #13 implementation and review gates are complete except for the external CI credential blocker; the #23 compatibility baseline remains the next implementation issue after an authorized merge.
+- Status: PR #24 has zero known review findings; the quota-bound GitGuardian Actions scan is being replaced by the repo-owned Betterleaks check.
+- Current phase: the active MCP baseline is restored; #13 implementation and its original review gates are complete, and the Betterleaks CI replacement is in validation/review; the #23 compatibility baseline remains the next implementation issue after an authorized merge.
 - Control plane: this packet plus umbrella issue #12; no repository Project board currently exists.
 - Scope: greenfield internal control plane with compatibility-preserving migration from the active MCP service, Vaultwarden payload custody, and an independent non-secret control plane.
 
@@ -49,11 +49,11 @@ These receipts establish the compatibility-preserving baseline. They are not aut
 ## Blockers and Risks
 
 - DAG: #13 is independent; the full downstream dependency graph is explicit in `TASKS.md`.
-- CI: GitHub `Secret Detection` fails before scanning because the configured GitGuardian API key is invalid; local Gitleaks and the separate GitGuardian integration check pass. Credential repair is outside this PR's code scope.
+- CI: GitHub `Secret Detection` exhausted the GitGuardian API usage allowance and reported the misleading error `Invalid GitGuardian API key` before scanning. The separate GitGuardian integration check passes, and the replacement Betterleaks scan passes on the exact PR range without an API credential.
 - Runtime topology, control-plane persistence technology, and pilot workload remain implementation decisions within the acceptance boundaries.
 - The legacy code exposes multiple auth profiles and deployment paths; retaining parallel contracts would undermine the single identity/runtime design.
 - Preserved snapshot/data are recovery assets, not proof that coordinated restore works.
 
 ## Handoff
 
-Next exact task: repair or replace the invalid GitGuardian Actions credential, rerun the required check on the exact PR head, then make the deliberate merge decision. After authorized merge and #13 closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
+Next exact task: validate and review the Betterleaks workflow replacement, rerun the required check on the exact PR head, then make the deliberate merge decision. After authorized merge and #13 closure, begin #23. At every handoff record exact head, changed files, validation, review state, blockers, decisions, and next issue.
