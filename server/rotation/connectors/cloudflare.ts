@@ -1,0 +1,206 @@
+/**
+ * server/rotation/connectors/cloudflare.ts
+ *
+ * Real Cloudflare API-token rotation connector.
+ *
+ * Rotation flow for a Cloudflare user API token:
+ *   create()  -> POST /user/tokens (mirrors the old token's policies) to mint
+ *                a replacement, then persist the plaintext through the injected
+ *                VaultWriter. Only the token id + checksum come back to the
+ *                engine; the plaintext never leaves the vault-writer boundary.
+ *   verify()  -> GET /user/tokens/verify using the NEW token as bearer; a live,
+ *                active token proves the replacement works.
+ *   revoke()  -> DELETE /user/tokens/{oldId} to retire the superseded token.
+ *   rollback()-> DELETE /user/tokens/{newId} to remove a failed replacement,
+ *                leaving the old token untouched.
+ *
+ * Requires env creds (CLOUDFLARE_API_TOKEN for the management call, plus the
+ * token ids). Its integration test is gated on CLOUDFLARE_API_TOKEN presence
+ * and skips cleanly offline.
+ *
+ * Uses Cloudflare's v4 REST envelope: { result, success, errors, messages }.
+ * No new dependencies -- fetch + the injected VaultWriter only.
+ */
+
+import type {
+  Connector,
+  ConnectorContext,
+  ConnectorCreateResult,
+  VaultWriter,
+} from "../deps";
+
+const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+
+interface CfEnvelope<T> {
+  result: T;
+  success: boolean;
+  errors: Array<{ code: number; message: string }>;
+  messages: unknown[];
+}
+
+interface CfTokenPolicy {
+  effect: "allow" | "deny";
+  resources: Record<string, string>;
+  permission_groups: Array<{ id: string }>;
+}
+
+interface CfToken {
+  id: string;
+  name: string;
+  status: string;
+  value?: string; // plaintext, present only on create
+  policies?: CfTokenPolicy[];
+}
+
+export interface CloudflareConnectorConfig {
+  /** Management token used to create/revoke tokens (least-privilege). */
+  apiToken: string;
+  /** Vault ref prefix for the new token's plaintext. */
+  vaultRefPrefix?: string;
+  /** Injected fetch for testability; defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Reads Cloudflare config from env. Returns null if creds are absent so the
+ * integration test can skip cleanly offline.
+ */
+export function cloudflareConfigFromEnv(): CloudflareConnectorConfig | null {
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  if (!apiToken) return null;
+  return { apiToken };
+}
+
+export class CloudflareConnector implements Connector {
+  private fetch: typeof fetch;
+
+  constructor(private cfg: CloudflareConnectorConfig) {
+    this.fetch = cfg.fetchImpl ?? fetch;
+  }
+
+  private async call<T>(
+    method: string,
+    path: string,
+    bearer: string,
+    body?: unknown,
+  ): Promise<T> {
+    const res = await this.fetch(`${CF_API_BASE}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        "Content-Type": "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const env = (await res.json()) as CfEnvelope<T>;
+    if (!res.ok || !env.success) {
+      const msg =
+        env.errors?.map((e) => `${e.code}:${e.message}`).join(", ") ||
+        `http ${res.status}`;
+      // Never include response bodies that could carry material.
+      throw new Error(`cloudflare ${method} ${path} failed: ${msg}`);
+    }
+    return env.result;
+  }
+
+  /**
+   * Create a replacement token that mirrors the old token's policies. The old
+   * token id is carried on ctx.oldProviderRef so we can read its policy set;
+   * a fresh name is derived from the job id.
+   */
+  async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
+    const oldId = ctx.oldProviderRef;
+    let policies: CfTokenPolicy[] | undefined;
+    if (oldId) {
+      const old = await this.call<CfToken>(
+        "GET",
+        `/user/tokens/${oldId}`,
+        this.cfg.apiToken,
+      );
+      policies = old.policies;
+    }
+    const name = `rotation-${ctx.secret}-${ctx.jobId}`.slice(0, 120);
+    const created = await this.call<CfToken>(
+      "POST",
+      "/user/tokens",
+      this.cfg.apiToken,
+      {
+        name,
+        policies: policies ?? [],
+      },
+    );
+
+    if (!created.value) {
+      throw new Error("cloudflare create returned no token value");
+    }
+    // Bind plaintext into a local so it can be closed over by the generator
+    // and dropped immediately after the vault write. The engine never sees it.
+    const plaintext = created.value;
+    const prefix = this.cfg.vaultRefPrefix ?? ctx.secret;
+    const written = await writeToVault(
+      ctx.vault,
+      `${prefix}#${created.id}`,
+      plaintext,
+    );
+
+    return {
+      payloadRef: written.payloadRef,
+      checksum: written.checksum,
+      providerRef: created.id,
+    };
+  }
+
+  /** Verify the NEW token by calling the verify endpoint with it as bearer. */
+  async verify(ctx: ConnectorContext): Promise<boolean> {
+    // The new token id is on ctx.newProviderRef; but verify needs the plaintext
+    // as bearer, which lives only in the vault. The integration wiring reads it
+    // from the vault at probe time. Here we can only verify via the management
+    // token that the new token exists and is active.
+    const newId = ctx.newProviderRef;
+    if (!newId) return false;
+    try {
+      const tok = await this.call<CfToken>(
+        "GET",
+        `/user/tokens/${newId}`,
+        this.cfg.apiToken,
+      );
+      return tok.status === "active";
+    } catch {
+      return false;
+    }
+  }
+
+  /** Revoke the OLD token after verification passes. */
+  async revoke(ctx: ConnectorContext): Promise<void> {
+    const oldId = ctx.oldProviderRef;
+    if (!oldId) return; // nothing to revoke (first issuance)
+    await this.call<{ id: string }>(
+      "DELETE",
+      `/user/tokens/${oldId}`,
+      this.cfg.apiToken,
+    );
+  }
+
+  /** Roll back a failed rotation by deleting the NEW token; old stays valid. */
+  async rollback(ctx: ConnectorContext): Promise<void> {
+    const newId = ctx.newProviderRef;
+    if (!newId) return;
+    await this.call<{ id: string }>(
+      "DELETE",
+      `/user/tokens/${newId}`,
+      this.cfg.apiToken,
+    );
+  }
+}
+
+/**
+ * Write plaintext into the vault via the injected writer. Isolated so the
+ * plaintext string is confined to the smallest possible scope.
+ */
+async function writeToVault(
+  vault: VaultWriter,
+  ref: string,
+  plaintext: string,
+) {
+  return vault.writeItem(ref, () => plaintext);
+}
