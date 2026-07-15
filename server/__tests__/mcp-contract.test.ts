@@ -101,6 +101,15 @@ async function initSession(): Promise<string> {
   return sid;
 }
 
+// Startup deadline for the subprocess to become healthy. On a cold single-file
+// run (`bun test <this file>`) the first `bun run server/mcp.ts` spawn pays a
+// compile + module-load cost that can exceed Bun's DEFAULT 5s per-hook timeout
+// even though the full-suite run (warm) is fast. We therefore (a) bound the
+// health wait explicitly and (b) pass an explicit hook timeout ABOVE that
+// deadline so both invocations pass. See finding P1 (mcp-contract.test.ts:104).
+const STARTUP_DEADLINE_MS = 12_000;
+const HOOK_TIMEOUT_MS = 20_000; // must stay > STARTUP_DEADLINE_MS
+
 beforeAll(async () => {
   proc = Bun.spawn(["bun", "run", "server/mcp.ts"], {
     cwd: new URL("../../", import.meta.url).pathname,
@@ -116,7 +125,7 @@ beforeAll(async () => {
   });
 
   // Wait for the health endpoint to come up (bounded).
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + STARTUP_DEADLINE_MS;
   while (Date.now() < deadline) {
     try {
       const r = await fetch(HEALTH, { signal: AbortSignal.timeout(500) });
@@ -126,8 +135,10 @@ beforeAll(async () => {
     }
     await Bun.sleep(150);
   }
-  throw new Error("MCP server did not become healthy within 8s");
-});
+  throw new Error(
+    `MCP server did not become healthy within ${STARTUP_DEADLINE_MS}ms`,
+  );
+}, HOOK_TIMEOUT_MS);
 
 afterAll(() => {
   proc?.kill();
@@ -168,6 +179,160 @@ const REQUIRED_INPUT: Record<string, string[]> = {
   create_secret: ["name"],
   update_secret: ["name"],
   delete_secret: ["name"],
+};
+
+// ---------------------------------------------------------------------------
+// Normalized-schema snapshot (finding P1: strengthen schema pinning).
+//
+// `normalizeProp` reduces a JSON-schema property to its contract-load-bearing
+// fields (type, enum, default, and — for arrays/objects — item shape), dropping
+// human descriptions. `normalizeTool` produces { inputSchema: { properties,
+// required }, annotations } with volatile SDK metadata ($schema, execution,
+// descriptions) stripped. EXPECTED_TOOL_SCHEMAS is the frozen expectation.
+// ---------------------------------------------------------------------------
+
+function normalizeProp(prop: any): any {
+  if (prop == null || typeof prop !== "object") return prop;
+  const out: Record<string, unknown> = {};
+  if (prop.type !== undefined) out.type = prop.type;
+  if (prop.enum !== undefined) out.enum = prop.enum;
+  if (prop.default !== undefined) out.default = prop.default;
+  if (prop.type === "array" && prop.items)
+    out.items = normalizeProp(prop.items);
+  if (prop.type === "object" && prop.properties) {
+    const props: Record<string, unknown> = {};
+    for (const k of Object.keys(prop.properties).sort()) {
+      props[k] = normalizeProp(prop.properties[k]);
+    }
+    out.properties = props;
+    if (prop.required) out.required = [...prop.required].sort();
+  }
+  return out;
+}
+
+function normalizeTool(tool: any): any {
+  const schema = tool.inputSchema ?? {};
+  const props: Record<string, unknown> = {};
+  for (const k of Object.keys(schema.properties ?? {}).sort()) {
+    props[k] = normalizeProp(schema.properties[k]);
+  }
+  return {
+    inputSchema: {
+      type: schema.type,
+      properties: props,
+      required: [...(schema.required ?? [])].sort(),
+    },
+    annotations: tool.annotations ?? {},
+  };
+}
+
+const FIELDS_ARRAY_SCHEMA = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      type: { type: "number" },
+      value: { type: "string" },
+    },
+    required: ["name", "value"],
+  },
+};
+
+/** Frozen, fully-normalized tool contract (types, enums, defaults, annotations). */
+const EXPECTED_TOOL_SCHEMAS: Record<string, unknown> = {
+  search_secrets: {
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", default: 20 },
+        query: { type: "string" },
+        vault: { type: "string" },
+      },
+      required: ["query"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  get_secret: {
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string" }, vault: { type: "string" } },
+      required: ["name"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  get_secret_fields: {
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string" }, vault: { type: "string" } },
+      required: ["name"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  list_secrets: {
+    inputSchema: {
+      type: "object",
+      properties: { filter: { type: "string" }, vault: { type: "string" } },
+      required: [],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  snapshot_info: {
+    inputSchema: { type: "object", properties: {}, required: [] },
+    annotations: { readOnlyHint: true },
+  },
+  get_service: {
+    inputSchema: {
+      type: "object",
+      properties: { service: { type: "string" } },
+      required: ["service"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  refresh_snapshot: {
+    inputSchema: { type: "object", properties: {}, required: [] },
+    annotations: { readOnlyHint: false, idempotentHint: true },
+  },
+  create_secret: {
+    inputSchema: {
+      type: "object",
+      properties: {
+        fields: FIELDS_ARRAY_SCHEMA,
+        name: { type: "string" },
+        notes: { type: "string" },
+        password: { type: "string" },
+        type: { type: "number" },
+        uri: { type: "string" },
+        username: { type: "string" },
+      },
+      required: ["name"],
+    },
+    annotations: { destructiveHint: false, idempotentHint: false },
+  },
+  update_secret: {
+    inputSchema: {
+      type: "object",
+      properties: {
+        fieldStrategy: { type: "string", enum: ["merge", "replace"] },
+        fields: FIELDS_ARRAY_SCHEMA,
+        name: { type: "string" },
+        notes: { type: "string" },
+        password: { type: "string" },
+        uri: { type: "string" },
+        username: { type: "string" },
+      },
+      required: ["name"],
+    },
+    annotations: { destructiveHint: true, idempotentHint: true },
+  },
+  delete_secret: {
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+    },
+    annotations: { destructiveHint: true, idempotentHint: false },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -289,6 +454,20 @@ describe("tools/list contract", () => {
     const update = tools.find((t) => t.name === "update_secret")!;
     expect(update.inputSchema.properties.fields).toBeDefined();
     expect(update.inputSchema.properties.fieldStrategy).toBeDefined();
+  });
+
+  // ------------------------------------------------------------------
+  // Full normalized-schema snapshot (finding P1: mcp-contract.test.ts:270).
+  // Pins the COMPLETE contract per tool: every property's type, enum, and
+  // default; the required set; and the tool annotations (readOnlyHint /
+  // destructiveHint / idempotentHint). Volatile/cosmetic fields ($schema,
+  // human descriptions, SDK-injected `execution`) are stripped so the snapshot
+  // fails on real contract drift, not on SDK metadata churn.
+  // ------------------------------------------------------------------
+  test("complete normalized input schema + annotations match the frozen baseline", () => {
+    const normalized: Record<string, unknown> = {};
+    for (const tool of tools) normalized[tool.name] = normalizeTool(tool);
+    expect(normalized).toEqual(EXPECTED_TOOL_SCHEMAS);
   });
 });
 
