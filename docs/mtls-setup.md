@@ -413,5 +413,4 @@ When rotating client certificates:
 ## See Also
 
 - [Security Profiles](../README.md#security-profiles)
-- [Response Encryption](./response-encryption.md)
-- [Audit Logging](./audit-logging.md)
+- [Response Encryption](./encryption.md)

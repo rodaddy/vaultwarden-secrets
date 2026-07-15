@@ -1,3460 +1,537 @@
 # vaultwarden-secrets
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/rodaddy)
-
-Secure secrets management library with Vaultwarden/Bitwarden CLI integration, encrypted caching, and macOS Keychain storage.
-
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.0+-orange.svg)](https://bun.sh/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+**A personal, self-hosted secret-manager control plane over Vaultwarden — GCP Secret Manager-style semantics (immutable versions, aliases, rotation) without multi-tenant bloat.**
+
+`vaultwarden-secrets` is a TypeScript/Bun library *and* a small fleet of services that put a real secrets platform in front of a [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (self-hosted Bitwarden) instance. It started as a caching secrets library and grew a control plane (immutable versions + aliases + audit ledger), a durable rotation engine, a REST API, an MCP server for AI agents, a least-privilege credential proxy, and a hardened, non-root deployment story.
+
+> **Version:** The package is `0.5.2` (see `package.json`). The MCP server reports its own server/version string `0.7.0` and speaks MCP protocol `2025-03-26`. This README describes what the code in this repository actually ships.
+
+---
+
+## Table of Contents
+
+- [What it is](#what-it-is)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Library API reference](#library-api-reference)
+- [CLI reference](#cli-reference)
+- [MCP server](#mcp-server)
+- [REST API](#rest-api)
+- [Credential proxy](#credential-proxy)
+- [Control plane: versions & aliases](#control-plane-versions--aliases)
+- [Rotation](#rotation)
+- [Access control & security model](#access-control--security-model)
+- [Deployment](#deployment)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Contributing & Security](#contributing--security)
+- [License](#license)
+
+---
+
+## What it is
+
+At its core is a caching secrets library that reads items from a Vaultwarden/Bitwarden vault via the `bw` CLI, encrypts them at rest, and serves them fast. On top of that library are optional services you run only if you want them:
+
+- **Secrets library** — `getSecret()` / `getSecretObject()` / `listSecrets()` with an encrypted LRU cache, macOS Keychain (or Linux file) session storage, multi-vault support, folder prefixes, path/field syntax, and an encrypted **snapshot** fallback so reads keep working when the vault is locked.
+- **REST API** (`server/main.ts`) — HTTP read access with tiered security profiles, enumeration-parity 404s, and folder scoping per client.
+- **MCP server** (`server/mcp.ts`) — the same vault exposed to AI agents as Model Context Protocol tools over Streamable HTTP, folder-scoped and profile-gated.
+- **Credential proxy** (`server/cred-proxy.ts`) — least-privilege, per-service credential handout for agents/workloads that should see *only* the fields they need.
+- **Control plane** (`server/control-plane/`) — an append-only SQLite metadata store for immutable secret versions, aliases, an audit ledger, and a durable outbox.
+- **Rotation engine** (`server/rotation/`) — a durable, crash-safe rotation state machine (create → verify → move alias → revoke) with provider connectors.
+- **Authorization** (`server/authz/`) — a default-deny policy engine that is the single decision point for secret-level operations.
+- **Workload identity** (`server/identity/`) — opaque `vwsk_` tokens issued/revoked/rotated by an operator CLI, honored identically by REST, MCP, and the proxy.
+
+Everything is designed for a homelab / single-operator deployment: no user directory, no tenants — just your vault, hardened services, and least-privilege access for the things that consume secrets.
+
+---
+
+## Architecture
+
+```
+                                bw CLI  ─►  Vaultwarden / Bitwarden vault
+                                   ▲
+                                   │  (session token in Keychain / file)
+        ┌──────────────────────────┴──────────────────────────┐
+        │            secrets library  (index.ts)               │
+        │   encrypted LRU cache · encrypted snapshot fallback  │
+        │   multi-vault · folder prefixes · field paths        │
+        └───┬───────────────┬───────────────┬─────────────┬────┘
+            │               │               │             │
+     ┌──────┴─────┐  ┌──────┴─────┐  ┌───────┴─────┐  ┌────┴──────────┐
+     │  CLI /     │  │  REST API  │  │  MCP server │  │ credential    │
+     │  `secret`  │  │  :3000     │  │  :3001      │  │ proxy :3003   │
+     │  bin       │  │ main.ts    │  │  mcp.ts     │  │ cred-proxy.ts │
+     └────────────┘  └──────┬─────┘  └──────┬──────┘  └───────────────┘
+                            │               │
+                            │        ┌──────┴────────────────────────┐
+                            └────────┤  workload identity (vwsk_)     │
+                                     │  default-deny authz            │
+                                     │  control plane (SQLite):       │
+                                     │   versions · aliases · ledger  │
+                                     │   · outbox                     │
+                                     │  rotation engine + connectors  │
+                                     └────────────────────────────────┘
+```
+
+The library is usable entirely on its own. Each service is independently runnable and shares the same underlying vault access and (where applicable) the same identity/authz path.
+
+---
+
 ## Features
 
-- **Zero Plaintext Storage** – Master encryption key stored in macOS Keychain, cache encrypted with AES-256-GCM
-- **Fast Retrieval** – Sub-100ms cached secret access with configurable TTL-based expiration
-- **Multi-Vault Support** – Switch between personal, work, and project vaults at runtime
-- **Type-Safe API** – Full TypeScript support with comprehensive error handling
-- **Integrity Verification** – HMAC-SHA256 protection against cache tampering
-- **LRU Eviction** – Automatic memory management with configurable cache size limits
-- **Category-Based TTL** – Different expiration times for API keys, passwords, tokens, and certificates
+**Secret retrieval & caching**
+- Read secrets by item name, field path (`item.login.password`), or custom field (`item.fields.API_KEY`).
+- Encrypted at-rest LRU cache (AES-256-GCM, key derived with PBKDF2) with hit/miss/eviction stats.
+- Encrypted **snapshot** fallback (`vw-snapshot-v2`, AES-256-GCM + HMAC) so reads survive a locked vault, with staleness warnings.
+- Multi-vault switching and per-vault sessions; default **folder prefix** to shorten lookups.
+- Cross-platform session storage: macOS Keychain via `security`, Linux via `BW_SESSION_FILE` / `MASTER_KEY_FILE`.
+
+**Control plane** (GCP Secret Manager-style)
+- Immutable, append-only secret **versions** (metadata only — `payload_ref`/checksum, never payload bytes).
+- **Aliases** (e.g. `current`, `latest`) that move atomically (CAS) between versions.
+- Version lifecycle: `ENABLED ⇄ DISABLED → DESTROYED` (terminal); destroyed versions are never returned.
+- Append-only **audit ledger** with hash chaining, and a durable **outbox** delivery queue with retries and dead-lettering.
+
+**Rotation**
+- Durable, resumable rotation engine: create → stage → reload consumers → verify → move alias → revoke → redacted receipt.
+- Never revokes the old credential until the new one verifies and the alias has moved; **never rolls back after publish** (routes to `reconcile-required`).
+- Per-credential fenced leases; idempotency keys de-duplicate concurrent rotations.
+- No secret material ever enters engine state (a leak guard scans every persisted/emitted value and fails closed).
+- Provider connectors (ships with a Cloudflare connector and a test connector).
+
+**Access control**
+- **Default-deny** authorization engine — the sole secret-level decision point.
+- **Enumeration parity**: REST get/list/fields return one byte-identical `404 {"error":"Secret not found"}` for denial, not-found, and backend-error alike.
+- **Workload identity**: opaque `vwsk_` tokens (only the SHA-256 hash is stored) honored identically across REST/MCP/proxy; legacy tokens accepted during migration and killable via `VW_LEGACY_TOKENS=off`.
+- **Folder scoping**: restrict a client/agent to specific Vaultwarden folders.
+- Tiered **security profiles** (`feeling-lucky`, `im-aware`, `im-a-dev`, `trust-no-one`) selecting auth, TLS, rate limiting, audit level, and write permissions.
+
+**Deployment**
+- Least-privilege: services run as a non-root `vaultwarden-secrets` user; automated deploys run as an operator via command-scoped `sudo -n` (no root shell, no blanket sudo).
+- systemd units, hardening (`NoNewPrivileges`, `ProtectSystem=strict`, etc.), and a runtime **drift check**.
+- Encrypted, verified, off-host **backups** with a monthly restore drill.
+
+---
 
 ## Prerequisites
 
-- **macOS** (Keychain is required for master key storage)
-- **Bun** ≥ 1.0.0 ([install](https://bun.sh/))
-- **Vaultwarden/Bitwarden CLI** – `bw` command installed and configured
+- **[Bun](https://bun.sh/)** ≥ 1.0 (runtime + package manager; there is no separate build step — sources are `.ts`).
+- **[Bitwarden CLI](https://bitwarden.com/help/cli/)** (`bw`) configured against your Vaultwarden server (`bw config server <url>`), logged in and unlockable.
+- A running **Vaultwarden** (or Bitwarden) instance.
+- For the hardened server deployment: a systemd-based Linux host (see [Deployment](#deployment)).
 
-```bash
-# Install Bitwarden CLI
-brew install bitwarden-cli
+The `install.sh` script can install Bun and the Bitwarden CLI for you (macOS and common Linux package managers).
 
-# Initialize Bitwarden (create account/login)
-bw login
-```
+---
 
 ## Installation
 
-### Quick Install
+Clone the repo and install dependencies:
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/vaultwarden-secrets.git
+git clone https://github.com/rodaddy/vaultwarden-secrets
 cd vaultwarden-secrets
-
-# Install dependencies
 bun install
-
-# Set up configuration directory
-bun run install-config
 ```
 
-### PAI Users
-
-If you're using this with PAI (Personal AI) framework:
+Optionally run the installer, which detects your OS, installs `bun` and `bw` if missing, and wires up the `secret` CLI + shell integration:
 
 ```bash
-# Install to PAI private directory
-bun run install-pai
+bun run install-config      # ./install.sh — standard install
+bun run install-pai         # ./install.sh --pai — install into a PAI private config layout
+bun run uninstall           # ./install.sh --uninstall
 ```
 
-This automatically detects and uses `~/.config/pai-private/vaultwarden-secrets/` for all configuration.
+`install.sh` also accepts `--dry-run` (preview), `--dir <path>`, and `--no-pai` (force standard mode). PAI integration is optional — the library, CLI, and services work standalone.
 
-### Installation Options
+To use the library from your own Bun/TypeScript project, import from the package root (`main` / `types` is `index.ts`).
 
-```bash
-# Preview what would be installed (dry-run)
-bun run install-config --dry-run
+---
 
-# Install to custom directory
-bun run install.ts --path ~/.my-secrets
+## Quick start
 
-# Uninstall
-bun run uninstall
-```
+### Library
 
-### From npm (when published)
+```ts
+import { getSecret, getSecretObject, setSession, setFolder } from 'vaultwarden-secrets';
 
-```bash
-bun add vaultwarden-secrets
-```
+// One-time: store a BW session token for a vault (see below for how to obtain it)
+await setSession('default', process.env.BW_SESSION!);
 
-### Development/Local
+// Optional: set a default folder so short names resolve under it
+await setFolder('Infrastructure');
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/vaultwarden-secrets.git
-cd vaultwarden-secrets
-
-# Install dependencies and set up config
-bun install
-bun run install-config
-
-# Link for local development
-bun link
-bun link vaultwarden-secrets
-```
-
-## Quick Start
-
-### 1. Unlock Your Vault
-
-Before using the library, unlock the Bitwarden CLI:
-
-```bash
-bw unlock
-# Follow prompts and copy the BW_SESSION token
-```
-
-### 2. Store Session in Keychain
-
-```typescript
-import { setSession } from 'vaultwarden-secrets';
-
-// After bw unlock, copy the BW_SESSION token
-await setSession('default', 'eyJleHAiOjE2NzcwODEyNDYsImFsZyI6IkhTMjU2In0...');
-```
-
-### 3. Get Secrets
-
-```typescript
-import { getSecret, getSecretObject } from 'vaultwarden-secrets';
-
-// Get a password field (default)
-const password = await getSecret('github-pat');
+// Get the password field (default) of an item
+const token = await getSecret('github-pat');
 
 // Get a specific field
-const username = await getSecret('github-pat.login.username');
+const user = await getSecret('github-pat.login.username');
 
 // Get a custom field
 const apiKey = await getSecret('github-pat.fields.API_KEY');
 
-// Get all fields as an object
-const allFields = await getSecretObject('github-pat');
-// Returns: { username: '...', password: '...', uri: '...', API_KEY: '...' }
+// Get every field as an object
+const all = await getSecretObject('github-pat');
+// → { username, password, uri?, totp?, notes?, ...customFields }
 ```
 
-## CLI Reference
-
-The `secret` command provides muscle-memory-friendly access to your secrets.
-
-### Installation
+Obtaining a session token (macOS example — Keychain handles the rest):
 
 ```bash
-# Install globally
-bun link
-
-# Add shell integration to ~/.zshrc
-source ~/.config/pai/lib/secrets/shell/secret.sh
+export BW_SESSION="$(bw unlock --raw)"
+bun run set-session default "$BW_SESSION"
 ```
 
-### Daily Commands
+### Services
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `secret <path>` | Get secret (shorthand) | `secret github-pat` |
-| `secret get <path>` | Get secret to stdout | `secret get "API Keys.OPENAI"` |
-| `secret copy <path>` | Copy to clipboard | `secret copy github-pat` |
-| `secret paste <path>` | Set from clipboard | `secret paste myapp.password` |
-| `secret set <path> [value]` | Set secret (prompts if no value) | `secret set myapp.token` |
+```bash
+# REST API (im-aware profile, bearer auth) on :3000
+bun run server:prod
 
-### Discovery Commands
+# REST API (feeling-lucky, no auth — DEV ONLY) on :3000
+bun run server:dev
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `secret list [filter]` | List secrets | `secret list github` |
-| `secret search <query>` | Fuzzy search | `secret search postgres` |
-| `secret show <item>` | Show all fields (tree view) | `secret show "PostgreSQL"` |
+# MCP server on :3001
+bun run mcp
 
-### Vault Management
+# Credential proxy on :3003
+bun run cred-proxy
+```
+
+---
+
+## Library API reference
+
+All functions are exported from `index.ts`. `SecretOptions` supports `{ vault?, skipCache?, category? }`.
+
+| Function | Signature | Description |
+|---|---|---|
+| `getSecret` | `(path: string, options?: SecretOptions) => Promise<string>` | Resolve one secret value. Supports field paths (`item.login.password`), custom fields (`item.fields.NAME`), alias resolution, folder prefixing, cache, and snapshot fallback. |
+| `getSecretObject` | `(itemName: string, options?: SecretOptions) => Promise<Record<string,string>>` | All fields of an item as a flat object (login fields, `notes`, and custom fields). |
+| `listSecrets` | `(filter?: string, options?: SecretOptions) => Promise<string[]>` | Sorted item names, optionally filtered (case-insensitive). Falls back to the snapshot when the vault is locked. |
+| `clearCache` | `(vaultId?: string) => Promise<void>` | Clear the encrypted cache (all vaults, or one). |
+| `getCacheStats` | `() => CacheStats` | Hit rate, entries, hits/misses/evictions/expirations, active vaults. |
+| `switchVault` | `(vaultId: string) => Promise<void>` | Make a vault the default and clear the cache. |
+| `getActiveVault` | `() => Promise<string>` | Current default vault ID. |
+| `setSession` | `(vaultId: string, token: string) => Promise<void>` | Store a `BW_SESSION` token for a vault (Keychain / file); registers the vault if new. |
+| `listVaults` | `() => Promise<VaultConfig[]>` | Configured vaults. |
+| `getFolder` | `() => Promise<string>` | Current default folder prefix (or `''`). |
+| `setFolder` | `(folder: string) => Promise<void>` | Set a default folder prefix; short names resolve under it. |
+| `clearFolder` | `() => Promise<void>` | Remove the default folder prefix. |
+| `getItemByName` | `(session: string, name: string) => Promise<any>` | Resolve an item by exact name, handling `bw`'s "More than one result" ambiguity via list + exact filter. |
+| `extractFieldFromItem` | `(item: any, parsed: { field?: string; customField?: string }) => string` | Pure field extractor: custom field, nested field path, or smart fallback (`password` → `notes` → first custom field). |
+
+Also re-exported: `SecretError`, `ErrorCode`, `DEFAULT_TTLS`, `Constants`, the `vaultManager` and `secretCache` singletons (advanced use), and the types `SecretOptions`, `CacheStats`, `VaultConfig`, `VaultConfigFile`, `CacheEntry`, `EncryptedData`, `SecretCategory`.
+
+**Path syntax**
+
+| Path | Resolves to |
+|---|---|
+| `Item` | The item's `login.password` (smart default) |
+| `Item.login.username` | Nested login field |
+| `Item.notes` | Notes field |
+| `Item.fields.CUSTOM` | A custom field named `CUSTOM` |
+| `Folder/Item` | Explicit folder (bypasses the default prefix) |
+
+---
+
+## CLI reference
+
+Two entry points:
+
+### `cli.ts` (`bun run cli.ts <command>`)
 
 | Command | Description |
-|---------|-------------|
-| `secret vault list` | List available vaults |
-| `secret vault use <name>` | Switch active vault |
-| `secret vault current` | Show current vault |
+|---|---|
+| `set-session <vault> <session>` | Store a Bitwarden session token |
+| `get <path>` | Print a secret value |
+| `list-vaults` | List configured vaults |
+| `cache-stats` | Show cache statistics |
+| `clear-cache [vault]` | Clear cache (all, or one vault) |
+| `snapshot` | Create a new encrypted snapshot of the default vault |
+| `snapshot --info` | Show existing snapshot metadata (age, item count, staleness) |
+| `help` | Usage |
 
-### Folder Prefix
+Convenience scripts: `bun run get <path>` and `bun run set-session <vault> <token>`.
 
-Organize secrets by project with folder prefixes:
+### `secret` bin (`./bin/secret`)
 
-```bash
-# Set folder prefix
-secret folder myproject
-# Now "secret get API_KEY" looks up "myproject/API_KEY"
+The richer daily-driver CLI (also installed on `PATH` by `install.sh`). `secret <path>` is shorthand for `secret get <path>`.
 
-# Show current folder
-secret folder
-# Output: myproject
+- **Daily:** `get`, `copy`, `paste`, `set`, `create`, `delete`
+- **Discovery:** `list [filter]`, `search <query>`, `show <item>` (tree view of all fields)
+- **Vault:** `vault list`, `vault use <name>`, `vault current`
+- **Folder prefix:** `folder`, `folder <path>`, `folder clear`
+- **Cache:** `cache clear`, `cache stats`, `cache refresh`
+- **Migration:** `migrate [paths...]`, `migrate --list|--auto|--dry-run`, `reset [source|all|list]` (scan a codebase and move discovered secrets into the vault)
+- **System:** `unlock` (Touch ID where available), `unlock --save`, `health`, `set-session <vault> <token>`, `version`, `help`
 
-# Clear folder prefix
-secret folder clear
-```
+On macOS, `unlock` can use Touch ID / Apple Watch via a bundled biometric helper (`bin/biometric-auth`).
 
-### Cache Management
+A portable shell integration (`shell/secret.sh`, bash + zsh) auto-detects the `secret` binary; source it from your shell rc.
 
-| Command | Description |
-|---------|-------------|
-| `secret cache clear` | Clear all cached secrets |
-| `secret cache stats` | Show hit/miss statistics |
-| `secret cache refresh` | Force refresh from VW |
+---
 
-### System Commands
+## MCP server
 
-| Command | Description |
-|---------|-------------|
-| `secret health` | Check bw CLI, session, connectivity |
-| `secret set-session <vault> <token>` | Store BW_SESSION in Keychain |
-| `secret version` | Show version |
-| `secret help` | Show help |
+`server/mcp.ts` exposes the vault to AI agents as Model Context Protocol tools over **Streamable HTTP** (`@modelcontextprotocol/sdk`). It runs on `MCP_PORT` (default `3001`) at `/mcp`, with a `/health` endpoint. Auth is a bearer token resolved through the shared workload-identity path (audience `mcp`); legacy `API_TOKEN_<CLIENT>` tokens are also accepted during migration. Requests without a valid credential get `401`. Stale MCP sessions are transparently re-initialized server-side.
 
-### Path Syntax
+Tools are folder-scoped by the active [security profile](#access-control--security-model) and (for writes) gated by `profile.allowWrites`. Under the default `im-aware` profile, all 12 tools below are available.
 
-```bash
-# Default: password field
-secret get github-pat
+**Read tools** (always available)
 
-# Specific field
-secret get github-pat.login.username
+| Tool | Purpose |
+|---|---|
+| `search_secrets` | Fuzzy search secret names |
+| `get_secret` | Get a secret value by name/path |
+| `get_secret_fields` | Get all fields of an item |
+| `list_secrets` | List secrets (optional filter) |
+| `snapshot_info` | Snapshot metadata (age, item count, staleness) |
+| `get_service` | All vault items for a multi-host service (`SERVICE_API` + `service01/02/...` naming convention) |
+| `get_credential` | Smart single-call lookup (exact → fuzzy → all fields) to avoid chaining calls |
 
-# Notes field (common for API keys)
-secret get "OpenAI API Key.notes"
+**Write tools** (only when `profile.allowWrites` is true)
 
-# Custom field
-secret get github-pat.fields.WEBHOOK_SECRET
-```
+| Tool | Purpose | Hint |
+|---|---|---|
+| `refresh_snapshot` | Force a snapshot refresh from the live vault | idempotent |
+| `create_secret` | Create a login (type 1) or secure note (type 2) with custom fields | — |
+| `update_secret` | Update login/custom fields (`fieldStrategy: merge \| replace`) | destructive |
+| `delete_secret` | Delete a secret in an allowed folder | destructive |
+| `rotate_secret` | Rotate a credential through the [rotation engine](#rotation) (verify → alias-move → revoke), returning a **redacted** receipt; authorized via default-deny authz | destructive, idempotent |
 
-## Shell Integration
+Cross-vault access is **rejected**: folder scope is enforced only against the default vault's snapshot, so any non-default `vault` argument on a scope-enforced read tool fails closed. A `vaultwarden://info` resource reports the server name, profile, folder scope, and tool list.
 
-Add to `~/.zshrc` or `~/.bashrc`:
+> The frozen tool contract is verified by `server/__tests__/mcp-contract.test.ts`. See [docs/pilot-cutover.md](docs/pilot-cutover.md) for how the MCP service was migrated onto the control plane + rotation engine, and [docs/compat/mcp-baseline.md](docs/compat/mcp-baseline.md) / [docs/compat/cutover-gates.md](docs/compat/cutover-gates.md) for the compatibility gates.
 
-```bash
-source ~/.config/pai/lib/secrets/shell/secret.sh
-```
+---
 
-### Muscle Memory Aliases
+## REST API
 
-| Alias | Expands To | Purpose |
-|-------|------------|---------|
-| `sg` | `secret get` | Get secret |
-| `sc` | `secret copy` | Copy to clipboard |
-| `ss` | `secret set` | Set secret |
-| `sl` | `secret list` | List secrets |
-| `sv` | `secret vault` | Vault commands |
-| `sth` | `secret health` | Health check |
+`server/main.ts` serves read access over HTTP on `PORT` (default `3000`). Endpoints:
 
-### Shell Functions
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness (public, no auth) |
+| `GET` | `/vaults` | List configured vaults |
+| `GET` | `/secret/:name` | Get a secret value (`?vault=`) |
+| `GET` | `/secret/:name/fields` | Get all fields of an item |
+| `GET` | `/secrets` | List secrets (`?filter=`) |
+| `GET` | `/secrets/search` | Fuzzy search (`?q=`, `?limit=`) |
+| `GET` | `/cache/stats` | Cache statistics |
+| `POST` | `/cache/clear` | Clear cache (`?vault=`) + refresh folder scope |
+| `GET` | `/snapshot/info` | Snapshot metadata |
+| `POST` | `/snapshot/create` | Create a snapshot |
 
-```bash
-# Export secret to environment variable
-se "github-pat.fields.TOKEN" GITHUB_TOKEN
-# Exports GITHUB_TOKEN=<secret value>
+The `get` / `list` / `fields` routes enforce **enumeration parity**: every denial, not-found, and backend error returns one byte-identical `404 {"error":"Secret not found"}` so existence and access can't be probed (see `server/routes/secrets-read.ts` and [docs/authz.md](docs/authz.md)). Unsupported methods on valid paths return `405`. Middleware (IP whitelist, rate limit, auth, audit, response encryption, folder scope) is applied per security profile. See [server/README.md](server/README.md) for endpoint examples and profile details.
 
-# Interactive picker (requires fzf)
-sp        # Pick and get
-sp copy   # Pick and copy to clipboard
-```
+---
 
-### Tab Completion
+## Credential proxy
 
-Tab completion is automatic for both bash and zsh after sourcing the shell file.
+`server/cred-proxy.ts` is a least-privilege credential handout for agents/workloads. It exposes a single route, `GET /cred/:service`, that returns **only** env-var-formatted credentials for an allowed service — no vault enumeration, no metadata, no item browsing. It listens on `PROXY_PORT` (default `3003`) with a `/health` endpoint, authenticated via the shared workload-identity path (audience `proxy`); the legacy `PROXY_TOKEN` shared secret is also accepted during migration.
 
-## Migration Wizard
+Two access modes (see `proxy.config.json`):
 
-Migrate secrets from `.env` files, shell configs, and scripts to Vaultwarden.
+1. **Allowlist** — map a service name → a vault item → env-var field mappings, e.g.:
+   ```json
+   {
+     "allowlist": {
+       "litellm": {
+         "vaultItem": "LiteLLM API Key",
+         "map": { "OPENAI_API_KEY": "field:API Key", "OPENAI_BASE_URL": "field:Base URL" }
+       }
+     }
+   }
+   ```
+2. **Folder fallback** — resolve a designated Vaultwarden folder (e.g. `AgentKeys`) at startup and auto-map fields for a matching item name.
 
-### Basic Usage
+Field extraction (`server/cred-proxy-extract.ts`) supports `field:<name>`, `login.password`, `login.username`, `login.uri`, and `notes`. Unknown services return `403`.
 
-```bash
-# Scan current directory
-secret migrate
+---
 
-# Scan specific paths
-secret migrate ~/.env ~/Development
+## Control plane: versions & aliases
 
-# Scan with depth limit
-secret migrate ~/projects --depth 2
-```
+`server/control-plane/` is a local SQLite metadata store (WAL + foreign keys) at `${VW_STATE_DIR:-~/.vaultwarden-secrets/state}/control-plane.db`, with numbered SQL migrations tracked in `schema_migrations`. It gives Vaultwarden GCP-Secret-Manager-style semantics:
 
-### What It Scans
+- **Logical secrets** and an append-only **`secret_versions`** table that stores only a `payload_ref` + checksum — **never payload bytes**.
+- **Aliases** (`secret_aliases`) that move atomically (`latest` auto-tracks; other aliases move by CAS).
+- Version lifecycle `ENABLED ⇄ DISABLED → DESTROYED` (terminal); `getVersion()` never returns a destroyed version.
+- An append-only **audit ledger** with `sha256(prevHash || row)` hash chaining (`ledger_head`), and a durable **outbox** delivery queue (leased delivery, bounded retries, dead-letter state).
+- An idempotent `reconcile()` for pending/committed operations; transactions use `BEGIN IMMEDIATE`.
 
-- `.env`, `.env.local`, `.env.production` files
-- `.zshrc`, `.bashrc`, `.profile` configs
-- `*.sh` shell scripts
-- `*.json`, `*.yaml`, `*.yml`, `*.toml` configs
+Full design: [docs/control-plane/design.md](docs/control-plane/design.md).
 
-### Detection Confidence
+---
 
-| Level | Action | Examples |
-|-------|--------|----------|
-| **High** | Auto-confirmed | `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD` |
-| **Medium** | Prompted | `KEY`, `PASS`, `CRED`, `PRIV` |
-| **Low** | Skipped in auto mode | `URL`, `HOST`, `USER`, `DATABASE` |
+## Rotation
 
-### Duplicate Handling
+`server/rotation/` is a durable, crash-safe rotation job state machine (`bun run scripts/rotate.ts` or the `rotate_secret` MCP tool). A rotation runs: **create → stage → reload consumers → verify → move alias → revoke → redacted receipt**, with these guarantees:
 
-When the same variable appears multiple times with different values:
+- **No downtime**: the old credential stays valid until the new one is verified and the alias is CAS-moved.
+- **Never rollback after publish**: once the alias may point at the new version, any failure fails closed to `reconcile-required`.
+- **No leak**: generated material flows only through an arming vault-writer proxy; a leak guard scans every persisted row, audit entry, outbox event, receipt, and error and fails closed.
+- **Serialized & idempotent**: per-credential fenced leases (`BEGIN IMMEDIATE` CAS); a duplicate idempotency key returns the existing job.
+- **Resumable**: `RotationEngine.resumePending()` on startup continues an interrupted rotation from its last fenced checkpoint.
 
-```
-⚠️  Same-name secrets with different values found:
-  Using last value (shell semantics). All values shown newest-first:
-
-  OPENAI_API_KEY:
-    → sk-new-key (line 45) (will use)
-      sk-old-key (line 12)
-```
-
-The **last value wins** (matches shell behavior).
-
-### Migration Output
-
-The wizard generates:
-
-1. **New file versions** with `$(secret get ...)` calls
-2. **VW import script** for batch creation
-3. **Cleanup summary** showing what can be removed
-
-### Output Locations
-
-```
-1. Side-by-side (.env → .env.migrated)
-2. Output folder (~/.config/pai/migrations/<date>/)
-3. In-place (backup original, replace with new)
-```
-
-### Dry Run
+Manual entry point (defaults to `--dry-run`; `--no-dry-run` intentionally errors in this build until real deps are injected):
 
 ```bash
-# Preview without making changes
-secret migrate ~/.env --dry-run
+bun run scripts/rotate.ts \
+  --credential "Cloudflare - DNS API" \
+  --connector cloudflare \
+  --strategy dual \
+  --consumers caddy,certbot \
+  --idempotency-key <request-id>
 ```
 
-## API Reference
+Ships with a **Cloudflare** connector (requires `CLOUDFLARE_API_TOKEN`) and a test connector. Consumer reloads are allowlist-only (systemd units named in `profile.rotationConsumers`); callers never supply commands. Full details: [docs/rotation.md](docs/rotation.md).
 
-### `getSecret(path, options?)`
+---
 
-Retrieve a single secret value from Vaultwarden with caching.
+## Access control & security model
 
-```typescript
-async function getSecret(
-  path: string,
-  options?: SecretOptions
-): Promise<string>
+**Default-deny authorization** (`server/authz/`) is the single secret-level decision point. Policies bind a workload `subject`, a `resourcePattern` (exact name, `*`, or `infra/*` prefix), one or more actions, and an allow/deny effect. Actions include `secret.get`, `secret.list`, `secret.create`, `secret.addVersion`, `secret.disable`, `secret.enable`, `secret.destroy`, `alias.move`, `policy.set`, `rotate`, `rotate.revoke`, `rotate.rollback`, `reconcile`. Precedence is fail-closed: malformed → deny, no match → deny, conflicting allow+deny → deny. Secret values never enter the policy model. See [docs/authz.md](docs/authz.md).
+
+**Enumeration parity** — REST get/list/fields (and MCP scope checks) return indistinguishable responses for denial, not-found, and backend errors, so callers can't enumerate which secrets exist or which they can reach.
+
+**Workload identity** (`server/identity/`) — opaque `vwsk_<id>_<random>` tokens; only the SHA-256 hash is stored, plaintext shown once at issuance/rotation. Verification fails closed on malformed/forged/expired/revoked/superseded/wrong-audience/missing tokens. One decision is applied identically across REST, MCP, and proxy. Operator CLI:
+
+```bash
+bun run identity issue  --subject <s> --audiences rest,mcp [--ttl <seconds>]
+bun run identity list
+bun run identity revoke --id <id>
+bun run identity rotate --id <id> [--overlap <seconds>]
 ```
 
-**Parameters:**
+Legacy `API_TOKEN_<CLIENT>` (REST/MCP) and `PROXY_TOKEN` (proxy only) are accepted during migration; `VW_LEGACY_TOKENS=off` disables **all** legacy acceptance. See [docs/runtime/identity.md](docs/runtime/identity.md).
 
-- `path` (string) – Secret path in format:
-  - `ItemName` – Return password field (default)
-  - `ItemName.login.username` – Get nested field
-  - `ItemName.fields.CUSTOM_FIELD` – Get custom field
+**Folder scoping** — restrict a client/agent to specific Vaultwarden folders (per-client `API_FOLDERS_*` for REST, or `folderScope` in the security profile for MCP).
 
-- `options` (optional):
-  - `vault` (string) – Vault ID (default: active vault)
-  - `category` (SecretCategory) – Category for TTL (`api_key`, `password`, `token`, `certificate`, `database`, `other`)
-  - `ttl` (number) – Custom TTL in seconds (overrides category default)
-  - `skipCache` (boolean) – Fetch fresh value, skip cache (default: false)
-  - `required` (boolean) – Throw error if not found (default: true)
-  - `metadata` (object) – Additional audit logging data
+**Security profiles** (`server/profiles.ts`) select the whole posture:
 
-**Returns:** Promise<string>
+| Profile | Auth | IP whitelist | TLS | Writes | Folder scope |
+|---|---|---|---|---|---|
+| `feeling-lucky` | none | auto local /24 | off | yes | none — **DEV ONLY** |
+| `im-aware` (default) | bearer | auto local /24 | recommended | yes (confirm) | `Infrastructure` |
+| `im-a-dev` | OAuth2 | auto local /24 | required | yes (confirm) | `Infrastructure` |
+| `trust-no-one` | mTLS + JWT | 127.0.0.1/32 | required+strict | no | none |
 
-**Throws:** `SecretError` if vault is locked or secret not found
+`trust-no-one` has fun aliases: `openclaw`, `tinfoil-hat`, `maximum-paranoia`, `aluminum-foil`, `aluminium-hat`, `fort-knox`. It adds ECDH P-256 + AES-256-GCM **response encryption** (see [docs/encryption.md](docs/encryption.md), `examples/encrypted-client.ts`) and forensic audit logging. mTLS setup: [docs/mtls-setup.md](docs/mtls-setup.md).
 
-**Examples:**
+**Least-privilege runtime** — services run as the non-root `vaultwarden-secrets` user (group `ai-services`) with systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`). Automated deploys run as an **operator** (not root) via command-scoped `sudo -n` — no root shell, no blanket sudo. `bun run drift-check` compares the repo-declared systemd envelope against the live host (unit content, listener exposure, service identity, state-path perms, liveness) and exits non-zero on any drift. See [docs/runtime/envelope.md](docs/runtime/envelope.md).
 
-```typescript
-// Get default password field
-const password = await getSecret('github-pat');
+---
 
-// Get specific nested field
-const username = await getSecret('github-pat.login.username');
+## Deployment
 
-// Get custom field
-const apiKey = await getSecret('github-pat.fields.API_KEY');
+The full production guide is [deploy/DEPLOY.md](deploy/DEPLOY.md). Highlights:
 
-// Skip cache for fresh value
-const fresh = await getSecret('github-pat', { skipCache: true });
+- Runtime services run as **non-root** `vaultwarden-secrets:ai-services` (the account is provisioned upstream; deploy preflight fails closed if it's missing).
+- Automated deploys (`deploy/deploy.sh` via `vw-deploy.service`) run as the **operator user**, routing every privileged action through `sudo -n` against the command-scoped grant in [deploy/sudoers.d/vaultwarden-secrets](deploy/sudoers.d/vaultwarden-secrets) — no root shell, no wildcard installs/deletes. Install & validate it:
+  ```bash
+  sudo install -m 0440 -o root -g root \
+    deploy/sudoers.d/vaultwarden-secrets /etc/sudoers.d/vaultwarden-secrets
+  visudo -cf /etc/sudoers.d/vaultwarden-secrets   # must print "parsed OK"
+  ```
+- systemd units for the REST API (:3000), MCP (:3001), cred-proxy (:3003), snapshot timer, backup timer, and deploy timer live in `deploy/systemd/`. The retired unauthenticated deploy trigger on port 3002 is removed and must not be restored.
+- **Backups** (`deploy/systemd/vw-backup.{service,timer}`) package the state directory with SQLite's online `.backup`, encrypt with AES-256-GCM, and ship off-host. `bun run scripts/backup-health.ts` fails closed on missing/stale/corrupt backups; `bun run scripts/restore-drill.ts <archive> --target <dir>` runs a monthly restore drill with `PRAGMA integrity_check`. See [docs/operations/backup.md](docs/operations/backup.md).
 
-// Use specific vault and category
-const token = await getSecret('work-token', {
-  vault: 'work',
-  category: 'token',
-  ttl: 3600
-});
-
-// Get without caching (sensitive data)
-const sensitive = await getSecret('master-password', {
-  skipCache: true,
-  metadata: { reason: 'admin-access' }
-});
-```
-
-### `getSecretObject(itemName, options?)`
-
-Retrieve all fields from a Vaultwarden item as a single object.
-
-```typescript
-async function getSecretObject(
-  itemName: string,
-  options?: SecretOptions
-): Promise<Record<string, string>>
-```
-
-**Returns:** Promise containing:
-- `username` – Login username
-- `password` – Login password
-- `uri` – First URI associated with item
-- `notes` – Item notes
-- `[customFieldName]` – All custom fields by name
-
-**Example:**
-
-```typescript
-const secrets = await getSecretObject('github-pat');
-console.log(secrets);
-// {
-//   username: 'my-github-user',
-//   password: 'ghp_xxxxxxxxxxxx',
-//   uri: 'https://github.com',
-//   notes: 'Primary PAT for CI/CD',
-//   API_KEY: 'sk_test_...',
-//   WEBHOOK_SECRET: 'whsec_...'
-// }
-```
-
-### `listSecrets(filter?, options?)`
-
-List available secrets from Vaultwarden with optional filtering.
-
-```typescript
-async function listSecrets(
-  filter?: string,
-  options?: SecretOptions
-): Promise<string[]>
-```
-
-**Parameters:**
-
-- `filter` (optional) – Filter items by name (case-insensitive partial match)
-- `options` (optional) – `vault` to query specific vault
-
-**Returns:** Sorted array of item names
-
-**Examples:**
-
-```typescript
-// List all secrets
-const allSecrets = await listSecrets();
-
-// Filter secrets
-const githubSecrets = await listSecrets('github');
-// Returns: ['github-pat', 'github-ssh-key']
-
-// List from specific vault
-const workSecrets = await listSecrets(undefined, { vault: 'work' });
-```
-
-### `switchVault(vaultId)`
-
-Switch the active vault for subsequent operations.
-
-```typescript
-async function switchVault(vaultId: string): Promise<void>
-```
-
-**Example:**
-
-```typescript
-// Switch to work vault
-await switchVault('work');
-
-// Now getSecret() uses 'work' vault by default
-const workToken = await getSecret('api-token');
-
-// Can still override per-call
-const personalSecret = await getSecret('personal-key', { vault: 'default' });
-```
-
-### `getActiveVault()`
-
-Get the currently active vault ID.
-
-```typescript
-async function getActiveVault(): Promise<string>
-```
-
-**Example:**
-
-```typescript
-const active = await getActiveVault();
-console.log(`Using vault: ${active}`);
-```
-
-### `setSession(vaultId, token)`
-
-Store a Bitwarden session token in Keychain after `bw unlock`.
-
-```typescript
-async function setSession(vaultId: string, token: string): Promise<void>
-```
-
-**Example:**
-
-```typescript
-// After running: bw unlock
-// Copy the BW_SESSION value and store it:
-await setSession('default', 'eyJleHAiOjE2NzcwODEyNDYsImFsZyI6IkhTMjU2In0...');
-```
-
-### `clearCache(vaultId?)`
-
-Clear the encrypted cache to force fresh secrets on next access.
-
-```typescript
-async function clearCache(vaultId?: string): Promise<void>
-```
-
-**Example:**
-
-```typescript
-// Clear all cached secrets
-await clearCache();
-
-// Clear only work vault cache
-await clearCache('work');
-```
-
-### `getCacheStats()`
-
-Get cache performance metrics and statistics.
-
-```typescript
-function getCacheStats(): CacheStats
-```
-
-**Returns:** Object containing:
-- `hits` – Total cache hits
-- `misses` – Total cache misses
-- `hitRate` – Hit rate (0–1)
-- `entries` – Current cached entries
-- `size` – Cache size in bytes
-- `maxSize` – Maximum cache size
-- `evictions` – Entries evicted due to size limit
-- `expirations` – Entries expired due to TTL
-- `vaults` – List of vault IDs in cache
-- `oldestEntry` – Oldest expiration time (ms)
-- `newestEntry` – Newest expiration time (ms)
-
-**Example:**
-
-```typescript
-const stats = getCacheStats();
-console.log(`Cache hit rate: ${(stats.hitRate * 100).toFixed(1)}%`);
-console.log(`Cached entries: ${stats.entries}`);
-console.log(`Active vaults: ${stats.vaults.join(', ')}`);
-```
-
-## Error Handling
-
-All functions throw `SecretError` with specific error codes:
-
-```typescript
-import { getSecret, SecretError, ErrorCode } from 'vaultwarden-secrets';
-
-try {
-  const secret = await getSecret('my-secret');
-} catch (error) {
-  if (error instanceof SecretError) {
-    switch (error.code) {
-      case ErrorCode.VAULT_LOCKED:
-        console.error('Vault locked. Run: bw unlock');
-        break;
-      case ErrorCode.SECRET_NOT_FOUND:
-        console.error('Secret not found in vault');
-        break;
-      case ErrorCode.KEYCHAIN_ACCESS_DENIED:
-        console.error('No permission to access Keychain');
-        break;
-      case ErrorCode.ENCRYPTION_FAILED:
-        console.error('Cache encryption failed');
-        break;
-      default:
-        console.error('Unknown error:', error.message);
-    }
-
-    // Check if error is retryable
-    if (error.retryable) {
-      console.log('You can retry this operation');
-    }
-  }
-}
-```
-
-**Error Codes:**
-
-| Code | Meaning | Retryable |
-|------|---------|-----------|
-| `VAULT_LOCKED` | Vault needs `bw unlock` | Yes |
-| `SECRET_NOT_FOUND` | Item or field doesn't exist | No |
-| `VAULT_CORRUPTED` | Vault sync/config issue | Yes |
-| `KEYCHAIN_NOT_FOUND` | Session not stored in Keychain | No |
-| `KEYCHAIN_ACCESS_DENIED` | Permission denied on Keychain | No |
-| `ENCRYPTION_FAILED` | AES-256-GCM encryption error | No |
-| `DECRYPTION_FAILED` | Cache decryption failed (tampering?) | No |
-| `INVALID_PATH` | Malformed secret path | No |
-| `INVALID_CATEGORY` | Unknown secret category | No |
-| `CACHE_ERROR` | Cache read/write error | Yes |
-| `FILE_SYSTEM_ERROR` | Filesystem operation failed | Yes |
-
-## Security Model
-
-### Master Key Storage
-
-- Stored in **macOS Keychain** (locked at system level)
-- Never written to disk in plaintext
-- Keychain service: `vaultwarden-secrets`
-- Accessible only to authenticated user
-
-### Cache Encryption
-
-- Cache file: `{VAULTWARDEN_SECRETS_DIR}/cache.json`
-- Default: `~/.config/vaultwarden-secrets/cache.json`
-- **AES-256-GCM** encryption (256-bit key)
-- **HMAC-SHA256** integrity verification
-- Each entry encrypted separately with unique IV
-- Automatic HMAC verification on load (detects tampering)
-
-### Session Tokens
-
-- BW_SESSION tokens stored in Keychain per vault
-- Tokens expire after vault lock or session timeout
-- Run `bw unlock` to refresh token
-
-### Data Flow
-
-```
-┌─────────────────────────────────────────┐
-│  Application Request                     │
-│  getSecret('item.field')                 │
-└─────────────────┬───────────────────────┘
-                  │
-        ┌─────────▼──────────┐
-        │  Check Cache       │ ◄─── Encrypted file + HMAC
-        │ (AES-256-GCM)      │     verification
-        └────────┬──────────┘
-                  │
-         ┌────────▼─────────────────┐
-         │  Cache Miss?             │
-         │  Fetch from Keychain     │
-         │  session token           │
-         └────────┬────────────────┘
-                  │
-        ┌─────────▼──────────────────┐
-        │  bw CLI (encrypted vault)  │
-        │  BW_SESSION=${token}       │
-        │  bw get item Item          │
-        └────────┬───────────────────┘
-                 │
-        ┌────────▼──────────┐
-        │  Encrypt + Cache  │ ──► {VAULTWARDEN_SECRETS_DIR}/cache.json
-        │  Return Secret    │     (HMAC signed)
-        └────────┬──────────┘
-                 │
-    ┌────────────▼────────────┐
-    │  Application (plaintext │
-    │  only in memory)        │
-    └─────────────────────────┘
-```
-
-### TTL by Category
-
-| Category | Default TTL | Use Case |
-|----------|-------------|----------|
-| `api_key` | 1 hour | External API keys, moderate change rate |
-| `password` | 30 minutes | User passwords, sensitive data |
-| `token` | 15 minutes | Session tokens, frequent rotation |
-| `certificate` | 24 hours | SSL certs, rarely change |
-| `database` | 1 hour | DB credentials, moderate change |
-| `other` | 30 minutes | Uncategorized (conservative default) |
+---
 
 ## Configuration
 
-### Configuration Directory
+Environment variables actually read by the code (see [deploy/env.example](deploy/env.example)):
 
-The library automatically detects the best configuration directory based on your setup:
+**Server / REST (`server/main.ts`)**
 
-**Detection Priority (deepest first):**
-1. `VAULTWARDEN_SECRETS_DIR` environment variable (explicit override)
-2. `~/.config/pai-private/vaultwarden-secrets/` (PAI private - highest auto priority)
-3. `~/.config/pai/vaultwarden-secrets/` (PAI public)
-4. `~/.config/vaultwarden-secrets/` (standalone default)
+| Variable | Default | Purpose |
+|---|---|---|
+| `SECURITY_PROFILE` | `im-aware` | Active security profile |
+| `PORT` | `3000` | REST listen port |
+| `HOST` | `0.0.0.0` | REST bind address |
+| `NODE_ENV` | — | `production` blocks the `feeling-lucky` profile |
+| `API_TOKEN_<CLIENT>` | — | Legacy bearer token(s) for the `im-aware` profile |
+| `API_FOLDERS_<CLIENT>` | — | Per-client folder scope for REST |
+| `IP_WHITELIST` | auto | Comma-separated CIDRs (or `disable`) to override auto-detection |
+| `AUDIT_LOG_FILE` | — | Write audit log to a file instead of console |
 
-```
-~/.config/vaultwarden-secrets/
-├── config.json    # Vault configurations
-├── cache.json     # Encrypted cache
-└── vaults/        # Vault-specific data
-```
+**MCP (`server/mcp.ts`)**
 
-**PAI Integration (Auto-Detection):**
+| Variable | Default | Purpose |
+|---|---|---|
+| `MCP_PORT` | `3001` | MCP listen port |
+| `MCP_HOST` | `0.0.0.0` | MCP bind address |
+| `SECURITY_PROFILE` | `im-aware` | Profile (folder scope + write gate) |
+| `VW_ROTATION_DB` | `<control-plane>.rotation-jobs.db` | Rotation job DB path |
 
-If you have PAI installed, the library automatically uses the PAI directory structure:
+**Credential proxy (`server/cred-proxy.ts`)**
 
-```bash
-# Automatically detected if directory exists:
-~/.config/pai-private/vaultwarden-secrets/  # Private credentials (highest priority)
-~/.config/pai/vaultwarden-secrets/          # Public/shareable configs
+| Variable | Default | Purpose |
+|---|---|---|
+| `PROXY_PORT` | `3003` | Proxy listen port |
+| `PROXY_TOKEN` | — | Legacy bearer token |
+| `BW_SESSION_FILE` | — | Vault session file (Linux/systemd) |
 
-# No environment variable needed - just works!
-```
+**Auth profiles (OAuth2 / mTLS)**
 
-**Manual Override:**
+`OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_CLIENTS_FILE`, `OAUTH_PROVIDER`, `OAUTH_CALLBACK_URL`, `JWT_SECRET`, `ALLOWED_CLIENT_CERTS`, `ALLOWED_CERT_FINGERPRINTS`, `MTLS_MODE`, `MTLS_HEADER`, `TLS_CERT`, `TLS_KEY`, `TLS_CA`.
 
-You can explicitly set the location using the `VAULTWARDEN_SECRETS_DIR` environment variable:
+**Identity, TLS & runtime**
 
-```bash
-# Force a specific location
-export VAULTWARDEN_SECRETS_DIR=~/.my-custom-secrets
+| Variable | Purpose |
+|---|---|
+| `VW_STATE_DIR` | Control-plane / identity state dir (default `~/.vaultwarden-secrets/state`) |
+| `VW_LEGACY_TOKENS` | `off` disables all legacy token acceptance |
+| `VW_REQUIRE_TLS` | `1` makes `recommended` TLS fail-closed if no cert |
+| `VW_DEPLOY_HOST` | SSH target for `drift-check` (never hardcoded) |
+| `BW_SESSION` / `BW_SESSION_FILE` / `MASTER_KEY_FILE` | Session/master-key storage (Linux) |
 
-# Add to your shell profile (.zshrc, .bashrc)
-export VAULTWARDEN_SECRETS_DIR=~/.config/pai-private/vaultwarden-secrets
-```
+**Backups** (`/etc/vaultwarden-secrets/backup.env`): `VW_BACKUP_KEY_FILE`, `VW_BACKUP_DEST`, `VW_BACKUP_RETAIN_DAYS` (30), `VW_BACKUP_MAX_AGE_HOURS` (24), `VW_BACKUP_RECEIPTS_DIR`.
 
-### Vault Configuration
+**Rotation connectors:** `CLOUDFLARE_API_TOKEN` (Cloudflare connector).
 
-Vaults are defined in `{VAULTWARDEN_SECRETS_DIR}/config.json`:
-
-```json
-{
-  "version": "1.0.0",
-  "defaultVault": "default",
-  "vaults": {
-    "default": {
-      "name": "default",
-      "path": "{VAULTWARDEN_SECRETS_DIR}/vaults/default",
-      "keychainItem": "session-default",
-      "description": "Personal vault",
-      "default": true
-    },
-    "work": {
-      "name": "work",
-      "path": "{VAULTWARDEN_SECRETS_DIR}/vaults/work",
-      "keychainItem": "session-work",
-      "description": "Work vault"
-    }
-  }
-}
-```
-
-### Environment Variables
-
-- `VAULTWARDEN_SECRETS_DIR` – Custom configuration directory (default: `~/.config/vaultwarden-secrets`)
-- `BW_CLIENTID` – Bitwarden organization ID (if using organization account)
-- `BW_CLIENTSECRET` – Bitwarden organization secret (if using organization account)
-- `BW_IDENTITY` – Custom Bitwarden identity URL (for Vaultwarden self-hosted)
-
-## Examples
-
-### Example 1: Get API Key
-
-```typescript
-import { getSecret } from 'vaultwarden-secrets';
-
-async function setupClaudeAPI() {
-  const apiKey = await getSecret('claude-api.fields.API_KEY', {
-    category: 'api_key',
-    ttl: 3600  // 1 hour cache
-  });
-
-  return { apiKey };
-}
-```
-
-### Example 2: Multi-Vault Usage
-
-```typescript
-import { getSecret, switchVault, getActiveVault } from 'vaultwarden-secrets';
-
-async function switchContext(environment: 'personal' | 'work') {
-  const vault = environment === 'personal' ? 'default' : 'work';
-  await switchVault(vault);
-
-  console.log(`Switched to vault: ${await getActiveVault()}`);
-}
-
-async function deployApp() {
-  // Deploy to production using work vault
-  await switchContext('work');
-  const dbPassword = await getSecret('prod-database.login.password');
-
-  // Backup to personal account
-  await switchContext('personal');
-  const backupKey = await getSecret('backup-service.fields.API_KEY');
-}
-```
-
-### Example 3: Batch Secrets Retrieval
-
-```typescript
-import { listSecrets, getSecretObject } from 'vaultwarden-secrets';
-
-async function loadEnvironment() {
-  // Find all secrets related to 'api'
-  const apiSecrets = await listSecrets('api');
-
-  // Load all as environment variables
-  const env: Record<string, string> = {};
-  for (const secretName of apiSecrets) {
-    const secret = await getSecretObject(secretName);
-    env[secretName.toUpperCase()] = secret.password || secret.fields?.API_KEY || '';
-  }
-
-  return env;
-}
-```
-
-### Example 4: Error Handling with Retry
-
-```typescript
-import { getSecret, SecretError, ErrorCode } from 'vaultwarden-secrets';
-
-async function getSecretWithRetry(
-  path: string,
-  maxRetries = 3
-): Promise<string> {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await getSecret(path);
-    } catch (error) {
-      if (error instanceof SecretError && error.retryable && i < maxRetries - 1) {
-        console.log(`Attempt ${i + 1} failed, retrying...`);
-        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Exponential backoff
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
-```
-
-### Example 5: Cache Management
-
-```typescript
-import { getCacheStats, clearCache } from 'vaultwarden-secrets';
-
-async function showCacheMetrics() {
-  const stats = getCacheStats();
-
-  console.log(`
-    Cache Statistics:
-    ─────────────────
-    Hit rate:       ${(stats.hitRate * 100).toFixed(1)}%
-    Hits:           ${stats.hits}
-    Misses:         ${stats.misses}
-    Entries:        ${stats.entries}
-    Size:           ${(stats.size / 1024).toFixed(2)} KB
-    Evictions:      ${stats.evictions}
-    Expirations:    ${stats.expirations}
-    Active vaults:  ${stats.vaults.join(', ')}
-  `);
-
-  // Clear cache if hit rate is too low
-  if (stats.hitRate < 0.5) {
-    console.log('Hit rate below 50%, clearing cache...');
-    await clearCache();
-  }
-}
-```
-
-## API Reference
-<!-- API START -->
-**vaultwarden-secrets**
-
-***
-
-# vaultwarden-secrets
-
-Secrets Management Library - Public API
-
-Provides secure secrets management with macOS Keychain integration,
-encrypted file caching, and Vaultwarden CLI integration.
-
-## Enumerations
-
-- [ErrorCode](enumerations/ErrorCode.md)
-
-## Classes
-
-- [SecretError](classes/SecretError.md)
-
-## Interfaces
-
-- [CacheEntry](interfaces/CacheEntry.md)
-- [CacheStats](interfaces/CacheStats.md)
-- [EncryptedData](interfaces/EncryptedData.md)
-- [SecretOptions](interfaces/SecretOptions.md)
-- [VaultConfig](interfaces/VaultConfig.md)
-- [VaultConfigFile](interfaces/VaultConfigFile.md)
-
-## Type Aliases
-
-- [SecretCategory](type-aliases/SecretCategory.md)
-
-## Variables
-
-- [Constants](variables/Constants.md)
-- [DEFAULT\_TTLS](variables/DEFAULT_TTLS.md)
-- [secretCache](variables/secretCache.md)
-- [vaultManager](variables/vaultManager.md)
-
-## Functions
-
-- [clearCache](functions/clearCache.md)
-- [clearFolder](functions/clearFolder.md)
-- [getActiveVault](functions/getActiveVault.md)
-- [getCacheStats](functions/getCacheStats.md)
-- [getFolder](functions/getFolder.md)
-- [getSecret](functions/getSecret.md)
-- [getSecretObject](functions/getSecretObject.md)
-- [listSecrets](functions/listSecrets.md)
-- [listVaults](functions/listVaults.md)
-- [setFolder](functions/setFolder.md)
-- [setSession](functions/setSession.md)
-- [switchVault](functions/switchVault.md)
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / SecretOptions
-
-# Interface: SecretOptions
-
-Defined in: [types.ts:268](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L268)
-
-Options for getSecret() function
-
-## Example
-
-```ts
-await getSecret('github-pat.token', {
-  vault: 'work',
-  category: 'api_key',
-  ttl: 3600,
-  required: true
-});
-```
-
-## Properties
-
-### category?
-
-> `optional` **category**: [`SecretCategory`](../type-aliases/SecretCategory.md)
-
-Defined in: [types.ts:273](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L273)
-
-Secret category for TTL (default: 'other')
-
-***
-
-### metadata?
-
-> `optional` **metadata**: `Record`\<`string`, `unknown`\>
-
-Defined in: [types.ts:285](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L285)
-
-Additional metadata for audit logging
-
-***
-
-### required?
-
-> `optional` **required**: `boolean`
-
-Defined in: [types.ts:279](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L279)
-
-Throw error if secret not found (default: true)
-
-***
-
-### skipCache?
-
-> `optional` **skipCache**: `boolean`
-
-Defined in: [types.ts:282](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L282)
-
-Skip cache and always fetch fresh (default: false)
-
-***
-
-### ttl?
-
-> `optional` **ttl**: `number`
-
-Defined in: [types.ts:276](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L276)
-
-Custom TTL in seconds (overrides category default)
-
-***
-
-### vault?
-
-> `optional` **vault**: `string`
-
-Defined in: [types.ts:270](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L270)
-
-Vault name (default: 'default')
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / CacheEntry
-
-# Interface: CacheEntry
-
-Defined in: [types.ts:114](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L114)
-
-Cache entry with TTL and access tracking
-
-## Properties
-
-### accessCount
-
-> **accessCount**: `number`
-
-Defined in: [types.ts:125](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L125)
-
-Number of times accessed
-
-***
-
-### category
-
-> **category**: [`SecretCategory`](../type-aliases/SecretCategory.md)
-
-Defined in: [types.ts:128](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L128)
-
-Secret category for TTL management
-
-***
-
-### expiresAt
-
-> **expiresAt**: `number`
-
-Defined in: [types.ts:119](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L119)
-
-Timestamp when entry expires (ms since epoch)
-
-***
-
-### lastAccessed
-
-> **lastAccessed**: `number`
-
-Defined in: [types.ts:122](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L122)
-
-Timestamp of last access (ms since epoch)
-
-***
-
-### value
-
-> **value**: [`EncryptedData`](EncryptedData.md)
-
-Defined in: [types.ts:116](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L116)
-
-Encrypted secret value (AES-256-GCM)
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / CacheStats
-
-# Interface: CacheStats
-
-Defined in: [types.ts:134](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L134)
-
-Cache statistics for monitoring
-
-## Properties
-
-### entries
-
-> **entries**: `number`
-
-Defined in: [types.ts:142](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L142)
-
-Current number of cached entries
-
-***
-
-### evictions
-
-> **evictions**: `number`
-
-Defined in: [types.ts:151](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L151)
-
-Number of entries evicted due to size limit
-
-***
-
-### expirations
-
-> **expirations**: `number`
-
-Defined in: [types.ts:154](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L154)
-
-Number of entries expired due to TTL
-
-***
-
-### hitRate
-
-> **hitRate**: `number`
-
-Defined in: [types.ts:157](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L157)
-
-Cache hit rate (0-1)
-
-***
-
-### hits
-
-> **hits**: `number`
-
-Defined in: [types.ts:136](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L136)
-
-Total number of cache hits
-
-***
-
-### maxSize
-
-> **maxSize**: `number`
-
-Defined in: [types.ts:148](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L148)
-
-Maximum cache size
-
-***
-
-### misses
-
-> **misses**: `number`
-
-Defined in: [types.ts:139](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L139)
-
-Total number of cache misses
-
-***
-
-### newestEntry?
-
-> `optional` **newestEntry**: `number`
-
-Defined in: [types.ts:163](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L163)
-
-Newest entry expiration time (ms since epoch)
-
-***
-
-### oldestEntry?
-
-> `optional` **oldestEntry**: `number`
-
-Defined in: [types.ts:160](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L160)
-
-Oldest entry expiration time (ms since epoch)
-
-***
-
-### size
-
-> **size**: `number`
-
-Defined in: [types.ts:145](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L145)
-
-Current number of cached entries
-
-***
-
-### vaults
-
-> **vaults**: `string`[]
-
-Defined in: [types.ts:166](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L166)
-
-List of vault IDs in cache
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / VaultConfigFile
-
-# Interface: VaultConfigFile
-
-Defined in: [types.ts:198](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L198)
-
-Full vault configuration file structure
-
-Located at: ~/.config/vaultwarden-secrets/config.json
-
-## Properties
-
-### aliases?
-
-> `optional` **aliases**: `Record`\<`string`, `string`\>
-
-Defined in: [types.ts:209](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L209)
-
-Secret aliases for cross-project references (alias → target)
-
-***
-
-### defaultFolder?
-
-> `optional` **defaultFolder**: `string`
-
-Defined in: [types.ts:206](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L206)
-
-Default folder prefix for secrets (e.g., "Projects/myapp")
-
-***
-
-### defaultVault?
-
-> `optional` **defaultVault**: `string`
-
-Defined in: [types.ts:203](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L203)
-
-Default vault name (if not specified in config entries)
-
-***
-
-### inherits?
-
-> `optional` **inherits**: `Record`\<`string`, `string`\>
-
-Defined in: [types.ts:212](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L212)
-
-Inheritance - project inherits secrets from another (project → parent)
-
-***
-
-### vaults
-
-> **vaults**: `Record`\<`string`, [`VaultConfig`](VaultConfig.md)\>
-
-Defined in: [types.ts:200](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L200)
-
-Map of vault name to vault config
-
-***
-
-### version
-
-> **version**: `string`
-
-Defined in: [types.ts:215](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L215)
-
-Configuration version for migrations
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / EncryptedData
-
-# Interface: EncryptedData
-
-Defined in: [types.ts:96](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L96)
-
-AES-256-GCM encrypted data structure
-
-## Example
-
-```ts
-{
- *   "iv": "base64-encoded-iv",
- *   "authTag": "base64-encoded-tag",
- *   "encryptedData": "base64-encoded-ciphertext"
- * }
-```
-
-## Properties
-
-### authTag
-
-> **authTag**: `string`
-
-Defined in: [types.ts:101](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L101)
-
-Authentication tag for GCM mode (base64)
-
-***
-
-### encryptedData
-
-> **encryptedData**: `string`
-
-Defined in: [types.ts:104](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L104)
-
-Encrypted payload (base64)
-
-***
-
-### iv
-
-> **iv**: `string`
-
-Defined in: [types.ts:98](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L98)
-
-Initialization vector (base64)
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / VaultConfig
-
-# Interface: VaultConfig
-
-Defined in: [types.ts:176](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L176)
-
-Vault configuration for a single vault
-
-## Properties
-
-### default?
-
-> `optional` **default**: `boolean`
-
-Defined in: [types.ts:190](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L190)
-
-Whether this is the default vault
-
-***
-
-### description?
-
-> `optional` **description**: `string`
-
-Defined in: [types.ts:187](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L187)
-
-Description of vault purpose
-
-***
-
-### keychainItem
-
-> **keychainItem**: `string`
-
-Defined in: [types.ts:184](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L184)
-
-Keychain item name for vault master password
-
-***
-
-### name
-
-> **name**: `string`
-
-Defined in: [types.ts:178](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L178)
-
-Vault name (e.g., 'default', 'work')
-
-***
-
-### path
-
-> **path**: `string`
-
-Defined in: [types.ts:181](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L181)
-
-Absolute path to vault file
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / listVaults
-
-# Function: listVaults()
-
-> **listVaults**(): `Promise`\<[`VaultConfig`](../interfaces/VaultConfig.md)[]\>
-
-Defined in: [index.ts:513](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L513)
-
-List all configured vaults
-
-## Returns
-
-`Promise`\<[`VaultConfig`](../interfaces/VaultConfig.md)[]\>
-
-Promise resolving to array of vault configurations
-
-## Example
-
-```ts
-const vaults = await listVaults();
-for (const vault of vaults) {
-  console.log(`${vault.name}: ${vault.description}`);
-}
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / setSession
-
-# Function: setSession()
-
-> **setSession**(`vaultId`, `token`): `Promise`\<`void`\>
-
-Defined in: [index.ts:482](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L482)
-
-Store a session token for a vault (after bw unlock)
-
-## Parameters
-
-### vaultId
-
-`string`
-
-Vault identifier
-
-### token
-
-`string`
-
-BW_SESSION token from bw unlock
-
-## Returns
-
-`Promise`\<`void`\>
-
-## Example
-
-```ts
-const result = await # vaultwarden-secrets
-
-Secure secrets management library with Vaultwarden/Bitwarden CLI integration, encrypted caching, and macOS Keychain storage.
-
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
-[![Bun](https://img.shields.io/badge/Bun-1.0+-orange.svg)](https://bun.sh/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-## Features
-
-- **Zero Plaintext Storage** – Master encryption key stored in macOS Keychain, cache encrypted with AES-256-GCM
-- **Fast Retrieval** – Sub-100ms cached secret access with configurable TTL-based expiration
-- **Multi-Vault Support** – Switch between personal, work, and project vaults at runtime
-- **Type-Safe API** – Full TypeScript support with comprehensive error handling
-- **Integrity Verification** – HMAC-SHA256 protection against cache tampering
-- **LRU Eviction** – Automatic memory management with configurable cache size limits
-- **Category-Based TTL** – Different expiration times for API keys, passwords, tokens, and certificates
-
-## Prerequisites
-
-- **macOS** (Keychain is required for master key storage)
-- **Bun** ≥ 1.0.0 ([install](https://bun.sh/))
-- **Vaultwarden/Bitwarden CLI** – `bw` command installed and configured
-
-```bash
-# Install Bitwarden CLI
-brew install bitwarden-cli
-
-# Initialize Bitwarden (create account/login)
-bw login
-```
-
-## Installation
-
-### Quick Install
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/vaultwarden-secrets.git
-cd vaultwarden-secrets
-
-# Install dependencies
-bun install
-
-# Set up configuration directory
-bun run install-config
-```
-
-### PAI Users
-
-If you're using this with PAI (Personal AI) framework:
-
-```bash
-# Install to PAI private directory
-bun run install-pai
-```
-
-This automatically detects and uses `~/.config/pai-private/vaultwarden-secrets/` for all configuration.
-
-### Installation Options
-
-```bash
-# Preview what would be installed (dry-run)
-bun run install-config --dry-run
-
-# Install to custom directory
-bun run install.ts --path ~/.my-secrets
-
-# Uninstall
-bun run uninstall
-```
-
-### From npm (when published)
-
-```bash
-bun add vaultwarden-secrets
-```
-
-### Development/Local
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/vaultwarden-secrets.git
-cd vaultwarden-secrets
-
-# Install dependencies and set up config
-bun install
-bun run install-config
-
-# Link for local development
-bun link
-bun link vaultwarden-secrets
-```
-
-## Quick Start
-
-### 1. Unlock Your Vault
-
-Before using the library, unlock the Bitwarden CLI:
-
-```bash
-bw unlock
-# Follow prompts and copy the BW_SESSION token
-```
-
-### 2. Store Session in Keychain
-
-```typescript
-import { setSession } from 'vaultwarden-secrets';
-
-// After bw unlock, copy the BW_SESSION token
-await setSession('default', 'eyJleHAiOjE2NzcwODEyNDYsImFsZyI6IkhTMjU2In0...');
-```
-
-### 3. Get Secrets
-
-```typescript
-import { getSecret, getSecretObject } from 'vaultwarden-secrets';
-
-// Get a password field (default)
-const password = await getSecret('github-pat');
-
-// Get a specific field
-const username = await getSecret('github-pat.login.username');
-
-// Get a custom field
-const apiKey = await getSecret('github-pat.fields.API_KEY');
-
-// Get all fields as an object
-const allFields = await getSecretObject('github-pat');
-// Returns: { username: '...', password: '...', uri: '...', API_KEY: '...' }
-```
-
-## CLI Reference
-
-The `secret` command provides muscle-memory-friendly access to your secrets.
-
-### Installation
-
-```bash
-# Install globally
-bun link
-
-# Add shell integration to ~/.zshrc
-source ~/.config/pai/lib/secrets/shell/secret.sh
-```
-
-### Daily Commands
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `secret <path>` | Get secret (shorthand) | `secret github-pat` |
-| `secret get <path>` | Get secret to stdout | `secret get "API Keys.OPENAI"` |
-| `secret copy <path>` | Copy to clipboard | `secret copy github-pat` |
-| `secret paste <path>` | Set from clipboard | `secret paste myapp.password` |
-| `secret set <path> [value]` | Set secret (prompts if no value) | `secret set myapp.token` |
-
-### Discovery Commands
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `secret list [filter]` | List secrets | `secret list github` |
-| `secret search <query>` | Fuzzy search | `secret search postgres` |
-| `secret show <item>` | Show all fields (tree view) | `secret show "PostgreSQL"` |
-
-### Vault Management
-
-| Command | Description |
-|---------|-------------|
-| `secret vault list` | List available vaults |
-| `secret vault use <name>` | Switch active vault |
-| `secret vault current` | Show current vault |
-
-### Folder Prefix
-
-Organize secrets by project with folder prefixes:
-
-```bash
-# Set folder prefix
-secret folder myproject
-# Now "secret get API_KEY" looks up "myproject/API_KEY"
-
-# Show current folder
-secret folder
-# Output: myproject
-
-# Clear folder prefix
-secret folder clear
-```
-
-### Cache Management
-
-| Command | Description |
-|---------|-------------|
-| `secret cache clear` | Clear all cached secrets |
-| `secret cache stats` | Show hit/miss statistics |
-| `secret cache refresh` | Force refresh from VW |
-
-### System Commands
-
-| Command | Description |
-|---------|-------------|
-| `secret health` | Check bw CLI, session, connectivity |
-| `secret set-session <vault> <token>` | Store BW_SESSION in Keychain |
-| `secret version` | Show version |
-| `secret help` | Show help |
-
-### Path Syntax
-
-```bash
-# Default: password field
-secret get github-pat
-
-# Specific field
-secret get github-pat.login.username
-
-# Notes field (common for API keys)
-secret get "OpenAI API Key.notes"
-
-# Custom field
-secret get github-pat.fields.WEBHOOK_SECRET
-```
-
-## Shell Integration
-
-Add to `~/.zshrc` or `~/.bashrc`:
-
-```bash
-source ~/.config/pai/lib/secrets/shell/secret.sh
-```
-
-### Muscle Memory Aliases
-
-| Alias | Expands To | Purpose |
-|-------|------------|---------|
-| `sg` | `secret get` | Get secret |
-| `sc` | `secret copy` | Copy to clipboard |
-| `ss` | `secret set` | Set secret |
-| `sl` | `secret list` | List secrets |
-| `sv` | `secret vault` | Vault commands |
-| `sth` | `secret health` | Health check |
-
-### Shell Functions
-
-```bash
-# Export secret to environment variable
-se "github-pat.fields.TOKEN" GITHUB_TOKEN
-# Exports GITHUB_TOKEN=<secret value>
-
-# Interactive picker (requires fzf)
-sp        # Pick and get
-sp copy   # Pick and copy to clipboard
-```
-
-### Tab Completion
-
-Tab completion is automatic for both bash and zsh after sourcing the shell file.
-
-## Migration Wizard
-
-Migrate secrets from `.env` files, shell configs, and scripts to Vaultwarden.
-
-### Basic Usage
-
-```bash
-# Scan current directory
-secret migrate
-
-# Scan specific paths
-secret migrate ~/.env ~/Development
-
-# Scan with depth limit
-secret migrate ~/projects --depth 2
-```
-
-### What It Scans
-
-- `.env`, `.env.local`, `.env.production` files
-- `.zshrc`, `.bashrc`, `.profile` configs
-- `*.sh` shell scripts
-- `*.json`, `*.yaml`, `*.yml`, `*.toml` configs
-
-### Detection Confidence
-
-| Level | Action | Examples |
-|-------|--------|----------|
-| **High** | Auto-confirmed | `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD` |
-| **Medium** | Prompted | `KEY`, `PASS`, `CRED`, `PRIV` |
-| **Low** | Skipped in auto mode | `URL`, `HOST`, `USER`, `DATABASE` |
-
-### Duplicate Handling
-
-When the same variable appears multiple times with different values:
-
-```
-⚠️  Same-name secrets with different values found:
-  Using last value (shell semantics). All values shown newest-first:
-
-  OPENAI_API_KEY:
-    → sk-new-key (line 45) (will use)
-      sk-old-key (line 12)
-```
-
-The **last value wins** (matches shell behavior).
-
-### Migration Output
-
-The wizard generates:
-
-1. **New file versions** with `$(secret get ...)` calls
-2. **VW import script** for batch creation
-3. **Cleanup summary** showing what can be removed
-
-### Output Locations
-
-```
-1. Side-by-side (.env → .env.migrated)
-2. Output folder (~/.config/pai/migrations/<date>/)
-3. In-place (backup original, replace with new)
-```
-
-### Dry Run
-
-```bash
-# Preview without making changes
-secret migrate ~/.env --dry-run
-```
-
-## API Reference
-
-### `getSecret(path, options?)`
-
-Retrieve a single secret value from Vaultwarden with caching.
-
-```typescript
-async function getSecret(
-  path: string,
-  options?: SecretOptions
-): Promise<string>
-```
-
-**Parameters:**
-
-- `path` (string) – Secret path in format:
-  - `ItemName` – Return password field (default)
-  - `ItemName.login.username` – Get nested field
-  - `ItemName.fields.CUSTOM_FIELD` – Get custom field
-
-- `options` (optional):
-  - `vault` (string) – Vault ID (default: active vault)
-  - `category` (SecretCategory) – Category for TTL (`api_key`, `password`, `token`, `certificate`, `database`, `other`)
-  - `ttl` (number) – Custom TTL in seconds (overrides category default)
-  - `skipCache` (boolean) – Fetch fresh value, skip cache (default: false)
-  - `required` (boolean) – Throw error if not found (default: true)
-  - `metadata` (object) – Additional audit logging data
-
-**Returns:** Promise<string>
-
-**Throws:** `SecretError` if vault is locked or secret not found
-
-**Examples:**
-
-```typescript
-// Get default password field
-const password = await getSecret('github-pat');
-
-// Get specific nested field
-const username = await getSecret('github-pat.login.username');
-
-// Get custom field
-const apiKey = await getSecret('github-pat.fields.API_KEY');
-
-// Skip cache for fresh value
-const fresh = await getSecret('github-pat', { skipCache: true });
-
-// Use specific vault and category
-const token = await getSecret('work-token', {
-  vault: 'work',
-  category: 'token',
-  ttl: 3600
-});
-
-// Get without caching (sensitive data)
-const sensitive = await getSecret('master-password', {
-  skipCache: true,
-  metadata: { reason: 'admin-access' }
-});
-```
-
-### `getSecretObject(itemName, options?)`
-
-Retrieve all fields from a Vaultwarden item as a single object.
-
-```typescript
-async function getSecretObject(
-  itemName: string,
-  options?: SecretOptions
-): Promise<Record<string, string>>
-```
-
-**Returns:** Promise containing:
-- `username` – Login username
-- `password` – Login password
-- `uri` – First URI associated with item
-- `notes` – Item notes
-- `[customFieldName]` – All custom fields by name
-
-**Example:**
-
-```typescript
-const secrets = await getSecretObject('github-pat');
-console.log(secrets);
-// {
-//   username: 'my-github-user',
-//   password: 'ghp_xxxxxxxxxxxx',
-//   uri: 'https://github.com',
-//   notes: 'Primary PAT for CI/CD',
-//   API_KEY: 'sk_test_...',
-//   WEBHOOK_SECRET: 'whsec_...'
-// }
-```
-
-### `listSecrets(filter?, options?)`
-
-List available secrets from Vaultwarden with optional filtering.
-
-```typescript
-async function listSecrets(
-  filter?: string,
-  options?: SecretOptions
-): Promise<string[]>
-```
-
-**Parameters:**
-
-- `filter` (optional) – Filter items by name (case-insensitive partial match)
-- `options` (optional) – `vault` to query specific vault
-
-**Returns:** Sorted array of item names
-
-**Examples:**
-
-```typescript
-// List all secrets
-const allSecrets = await listSecrets();
-
-// Filter secrets
-const githubSecrets = await listSecrets('github');
-// Returns: ['github-pat', 'github-ssh-key']
-
-// List from specific vault
-const workSecrets = await listSecrets(undefined, { vault: 'work' });
-```
-
-### `switchVault(vaultId)`
-
-Switch the active vault for subsequent operations.
-
-```typescript
-async function switchVault(vaultId: string): Promise<void>
-```
-
-**Example:**
-
-```typescript
-// Switch to work vault
-await switchVault('work');
-
-// Now getSecret() uses 'work' vault by default
-const workToken = await getSecret('api-token');
-
-// Can still override per-call
-const personalSecret = await getSecret('personal-key', { vault: 'default' });
-```
-
-### `getActiveVault()`
-
-Get the currently active vault ID.
-
-```typescript
-async function getActiveVault(): Promise<string>
-```
-
-**Example:**
-
-```typescript
-const active = await getActiveVault();
-console.log(`Using vault: ${active}`);
-```
-
-### `setSession(vaultId, token)`
-
-Store a Bitwarden session token in Keychain after `bw unlock`.
-
-```typescript
-async function setSession(vaultId: string, token: string): Promise<void>
-```
-
-**Example:**
-
-```typescript
-// After running: bw unlock
-// Copy the BW_SESSION value and store it:
-await setSession('default', 'eyJleHAiOjE2NzcwODEyNDYsImFsZyI6IkhTMjU2In0...');
-```
-
-### `clearCache(vaultId?)`
-
-Clear the encrypted cache to force fresh secrets on next access.
-
-```typescript
-async function clearCache(vaultId?: string): Promise<void>
-```
-
-**Example:**
-
-```typescript
-// Clear all cached secrets
-await clearCache();
-
-// Clear only work vault cache
-await clearCache('work');
-```
-
-### `getCacheStats()`
-
-Get cache performance metrics and statistics.
-
-```typescript
-function getCacheStats(): CacheStats
-```
-
-**Returns:** Object containing:
-- `hits` – Total cache hits
-- `misses` – Total cache misses
-- `hitRate` – Hit rate (0–1)
-- `entries` – Current cached entries
-- `size` – Cache size in bytes
-- `maxSize` – Maximum cache size
-- `evictions` – Entries evicted due to size limit
-- `expirations` – Entries expired due to TTL
-- `vaults` – List of vault IDs in cache
-- `oldestEntry` – Oldest expiration time (ms)
-- `newestEntry` – Newest expiration time (ms)
-
-**Example:**
-
-```typescript
-const stats = getCacheStats();
-console.log(`Cache hit rate: ${(stats.hitRate * 100).toFixed(1)}%`);
-console.log(`Cached entries: ${stats.entries}`);
-console.log(`Active vaults: ${stats.vaults.join(', ')}`);
-```
-
-## Error Handling
-
-All functions throw `SecretError` with specific error codes:
-
-```typescript
-import { getSecret, SecretError, ErrorCode } from 'vaultwarden-secrets';
-
-try {
-  const secret = await getSecret('my-secret');
-} catch (error) {
-  if (error instanceof SecretError) {
-    switch (error.code) {
-      case ErrorCode.VAULT_LOCKED:
-        console.error('Vault locked. Run: bw unlock');
-        break;
-      case ErrorCode.SECRET_NOT_FOUND:
-        console.error('Secret not found in vault');
-        break;
-      case ErrorCode.KEYCHAIN_ACCESS_DENIED:
-        console.error('No permission to access Keychain');
-        break;
-      case ErrorCode.ENCRYPTION_FAILED:
-        console.error('Cache encryption failed');
-        break;
-      default:
-        console.error('Unknown error:', error.message);
-    }
-
-    // Check if error is retryable
-    if (error.retryable) {
-      console.log('You can retry this operation');
-    }
-  }
-}
-```
-
-**Error Codes:**
-
-| Code | Meaning | Retryable |
-|------|---------|-----------|
-| `VAULT_LOCKED` | Vault needs `bw unlock` | Yes |
-| `SECRET_NOT_FOUND` | Item or field doesn't exist | No |
-| `VAULT_CORRUPTED` | Vault sync/config issue | Yes |
-| `KEYCHAIN_NOT_FOUND` | Session not stored in Keychain | No |
-| `KEYCHAIN_ACCESS_DENIED` | Permission denied on Keychain | No |
-| `ENCRYPTION_FAILED` | AES-256-GCM encryption error | No |
-| `DECRYPTION_FAILED` | Cache decryption failed (tampering?) | No |
-| `INVALID_PATH` | Malformed secret path | No |
-| `INVALID_CATEGORY` | Unknown secret category | No |
-| `CACHE_ERROR` | Cache read/write error | Yes |
-| `FILE_SYSTEM_ERROR` | Filesystem operation failed | Yes |
-
-## Security Model
-
-### Master Key Storage
-
-- Stored in **macOS Keychain** (locked at system level)
-- Never written to disk in plaintext
-- Keychain service: `vaultwarden-secrets`
-- Accessible only to authenticated user
-
-### Cache Encryption
-
-- Cache file: `{VAULTWARDEN_SECRETS_DIR}/cache.json`
-- Default: `~/.config/vaultwarden-secrets/cache.json`
-- **AES-256-GCM** encryption (256-bit key)
-- **HMAC-SHA256** integrity verification
-- Each entry encrypted separately with unique IV
-- Automatic HMAC verification on load (detects tampering)
-
-### Session Tokens
-
-- BW_SESSION tokens stored in Keychain per vault
-- Tokens expire after vault lock or session timeout
-- Run `bw unlock` to refresh token
-
-### Data Flow
-
-```
-┌─────────────────────────────────────────┐
-│  Application Request                     │
-│  getSecret('item.field')                 │
-└─────────────────┬───────────────────────┘
-                  │
-        ┌─────────▼──────────┐
-        │  Check Cache       │ ◄─── Encrypted file + HMAC
-        │ (AES-256-GCM)      │     verification
-        └────────┬──────────┘
-                  │
-         ┌────────▼─────────────────┐
-         │  Cache Miss?             │
-         │  Fetch from Keychain     │
-         │  session token           │
-         └────────┬────────────────┘
-                  │
-        ┌─────────▼──────────────────┐
-        │  bw CLI (encrypted vault)  │
-        │  BW_SESSION=${token}       │
-        │  bw get item Item          │
-        └────────┬───────────────────┘
-                 │
-        ┌────────▼──────────┐
-        │  Encrypt + Cache  │ ──► {VAULTWARDEN_SECRETS_DIR}/cache.json
-        │  Return Secret    │     (HMAC signed)
-        └────────┬──────────┘
-                 │
-    ┌────────────▼────────────┐
-    │  Application (plaintext │
-    │  only in memory)        │
-    └─────────────────────────┘
-```
-
-### TTL by Category
-
-| Category | Default TTL | Use Case |
-|----------|-------------|----------|
-| `api_key` | 1 hour | External API keys, moderate change rate |
-| `password` | 30 minutes | User passwords, sensitive data |
-| `token` | 15 minutes | Session tokens, frequent rotation |
-| `certificate` | 24 hours | SSL certs, rarely change |
-| `database` | 1 hour | DB credentials, moderate change |
-| `other` | 30 minutes | Uncategorized (conservative default) |
-
-## Configuration
-
-### Configuration Directory
-
-The library automatically detects the best configuration directory based on your setup:
-
-**Detection Priority (deepest first):**
-1. `VAULTWARDEN_SECRETS_DIR` environment variable (explicit override)
-2. `~/.config/pai-private/vaultwarden-secrets/` (PAI private - highest auto priority)
-3. `~/.config/pai/vaultwarden-secrets/` (PAI public)
-4. `~/.config/vaultwarden-secrets/` (standalone default)
-
-```
-~/.config/vaultwarden-secrets/
-├── config.json    # Vault configurations
-├── cache.json     # Encrypted cache
-└── vaults/        # Vault-specific data
-```
-
-**PAI Integration (Auto-Detection):**
-
-If you have PAI installed, the library automatically uses the PAI directory structure:
-
-```bash
-# Automatically detected if directory exists:
-~/.config/pai-private/vaultwarden-secrets/  # Private credentials (highest priority)
-~/.config/pai/vaultwarden-secrets/          # Public/shareable configs
-
-# No environment variable needed - just works!
-```
-
-**Manual Override:**
-
-You can explicitly set the location using the `VAULTWARDEN_SECRETS_DIR` environment variable:
-
-```bash
-# Force a specific location
-export VAULTWARDEN_SECRETS_DIR=~/.my-custom-secrets
-
-# Add to your shell profile (.zshrc, .bashrc)
-export VAULTWARDEN_SECRETS_DIR=~/.config/pai-private/vaultwarden-secrets
-```
-
-### Vault Configuration
-
-Vaults are defined in `{VAULTWARDEN_SECRETS_DIR}/config.json`:
-
-```json
-{
-  "version": "1.0.0",
-  "defaultVault": "default",
-  "vaults": {
-    "default": {
-      "name": "default",
-      "path": "{VAULTWARDEN_SECRETS_DIR}/vaults/default",
-      "keychainItem": "session-default",
-      "description": "Personal vault",
-      "default": true
-    },
-    "work": {
-      "name": "work",
-      "path": "{VAULTWARDEN_SECRETS_DIR}/vaults/work",
-      "keychainItem": "session-work",
-      "description": "Work vault"
-    }
-  }
-}
-```
-
-### Environment Variables
-
-- `VAULTWARDEN_SECRETS_DIR` – Custom configuration directory (default: `~/.config/vaultwarden-secrets`)
-- `BW_CLIENTID` – Bitwarden organization ID (if using organization account)
-- `BW_CLIENTSECRET` – Bitwarden organization secret (if using organization account)
-- `BW_IDENTITY` – Custom Bitwarden identity URL (for Vaultwarden self-hosted)
-
-## Examples
-
-### Example 1: Get API Key
-
-```typescript
-import { getSecret } from 'vaultwarden-secrets';
-
-async function setupClaudeAPI() {
-  const apiKey = await getSecret('claude-api.fields.API_KEY', {
-    category: 'api_key',
-    ttl: 3600  // 1 hour cache
-  });
-
-  return { apiKey };
-}
-```
-
-### Example 2: Multi-Vault Usage
-
-```typescript
-import { getSecret, switchVault, getActiveVault } from 'vaultwarden-secrets';
-
-async function switchContext(environment: 'personal' | 'work') {
-  const vault = environment === 'personal' ? 'default' : 'work';
-  await switchVault(vault);
-
-  console.log(`Switched to vault: ${await getActiveVault()}`);
-}
-
-async function deployApp() {
-  // Deploy to production using work vault
-  await switchContext('work');
-  const dbPassword = await getSecret('prod-database.login.password');
-
-  // Backup to personal account
-  await switchContext('personal');
-  const backupKey = await getSecret('backup-service.fields.API_KEY');
-}
-```
-
-### Example 3: Batch Secrets Retrieval
-
-```typescript
-import { listSecrets, getSecretObject } from 'vaultwarden-secrets';
-
-async function loadEnvironment() {
-  // Find all secrets related to 'api'
-  const apiSecrets = await listSecrets('api');
-
-  // Load all as environment variables
-  const env: Record<string, string> = {};
-  for (const secretName of apiSecrets) {
-    const secret = await getSecretObject(secretName);
-    env[secretName.toUpperCase()] = secret.password || secret.fields?.API_KEY || '';
-  }
-
-  return env;
-}
-```
-
-### Example 4: Error Handling with Retry
-
-```typescript
-import { getSecret, SecretError, ErrorCode } from 'vaultwarden-secrets';
-
-async function getSecretWithRetry(
-  path: string,
-  maxRetries = 3
-): Promise<string> {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await getSecret(path);
-    } catch (error) {
-      if (error instanceof SecretError && error.retryable && i < maxRetries - 1) {
-        console.log(`Attempt ${i + 1} failed, retrying...`);
-        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1))); // Exponential backoff
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
-```
-
-### Example 5: Cache Management
-
-```typescript
-import { getCacheStats, clearCache } from 'vaultwarden-secrets';
-
-async function showCacheMetrics() {
-  const stats = getCacheStats();
-
-  console.log(`
-    Cache Statistics:
-    ─────────────────
-    Hit rate:       ${(stats.hitRate * 100).toFixed(1)}%
-    Hits:           ${stats.hits}
-    Misses:         ${stats.misses}
-    Entries:        ${stats.entries}
-    Size:           ${(stats.size / 1024).toFixed(2)} KB
-    Evictions:      ${stats.evictions}
-    Expirations:    ${stats.expirations}
-    Active vaults:  ${stats.vaults.join(', ')}
-  `);
-
-  // Clear cache if hit rate is too low
-  if (stats.hitRate < 0.5) {
-    console.log('Hit rate below 50%, clearing cache...');
-    await clearCache();
-  }
-}
-```
-
-## API Reference
-bw unlock`.text();
-const match = result.match(/BW_SESSION="([^"]+)"/);
-if (match) {
-  await setSession('default', match[1]);
-}
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / getCacheStats
-
-# Function: getCacheStats()
-
-> **getCacheStats**(): [`CacheStats`](../interfaces/CacheStats.md)
-
-Defined in: [index.ts:436](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L436)
-
-Get cache statistics
-
-## Returns
-
-[`CacheStats`](../interfaces/CacheStats.md)
-
-Cache statistics including hit rate, entries, and vaults
-
-## Example
-
-```ts
-const stats = getCacheStats();
-console.log(`Cache hit rate: ${(stats.hitRate * 100).toFixed(1)}%`);
-console.log(`Cached entries: ${stats.entries}`);
-console.log(`Active vaults: ${stats.vaults.join(', ')}`);
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / getSecret
-
-# Function: getSecret()
-
-> **getSecret**(`path`, `options`): `Promise`\<`string`\>
-
-Defined in: [index.ts:146](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L146)
-
-Get a secret from Vaultwarden with caching
-
-## Parameters
-
-### path
-
-`string`
-
-Secret path (e.g., "github-pat", "github-pat.password", "github-pat.fields.API_KEY")
-
-### options
-
-[`SecretOptions`](../interfaces/SecretOptions.md) = `{}`
-
-Options for secret retrieval
-
-## Returns
-
-`Promise`\<`string`\>
-
-Promise resolving to secret value
-
-## Throws
-
-If vault is locked or secret not found
-
-## Example
-
-```ts
-// Get password field (default)
-const password = await getSecret('github-pat');
-
-// Get specific field
-const username = await getSecret('github-pat.login.username');
-
-// Get custom field
-const apiKey = await getSecret('github-pat.fields.API_KEY');
-
-// Skip cache for fresh value
-const fresh = await getSecret('github-pat', { skipCache: true });
-
-// Use specific vault
-const workSecret = await getSecret('work-token', { vault: 'work' });
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / listSecrets
-
-# Function: listSecrets()
-
-> **listSecrets**(`filter?`, `options?`): `Promise`\<`string`[]\>
-
-Defined in: [index.ts:360](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L360)
-
-List available secrets (items) from Vaultwarden
-
-## Parameters
-
-### filter?
-
-`string`
-
-Optional filter string (case-insensitive)
-
-### options?
-
-[`SecretOptions`](../interfaces/SecretOptions.md) = `{}`
-
-Options for listing
-
-## Returns
-
-`Promise`\<`string`[]\>
-
-Promise resolving to sorted array of item names
-
-## Throws
-
-If vault is locked
-
-## Example
-
-```ts
-// List all secrets
-const allSecrets = await listSecrets();
-
-// List filtered secrets
-const githubSecrets = await listSecrets('github');
-
-// List from specific vault
-const workSecrets = await listSecrets(undefined, { vault: 'work' });
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / switchVault
-
-# Function: switchVault()
-
-> **switchVault**(`vaultId`): `Promise`\<`void`\>
-
-Defined in: [index.ts:450](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L450)
-
-Switch active vault
-
-## Parameters
-
-### vaultId
-
-`string`
-
-ID of vault to activate
-
-## Returns
-
-`Promise`\<`void`\>
-
-## Throws
-
-If vault not found
-
-## Example
-
-```ts
-await switchVault('work');
-// Now getSecret() uses 'work' vault by default
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / clearCache
-
-# Function: clearCache()
-
-> **clearCache**(`vaultId?`): `Promise`\<`void`\>
-
-Defined in: [index.ts:421](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L421)
-
-Clear the encrypted cache
-
-## Parameters
-
-### vaultId?
-
-`string`
-
-Optional vault ID to clear (clears all if not specified)
-
-## Returns
-
-`Promise`\<`void`\>
-
-## Example
-
-```ts
-// Clear all cached secrets
-await clearCache();
-
-// Clear only work vault cache
-await clearCache('work');
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / getFolder
-
-# Function: getFolder()
-
-> **getFolder**(): `Promise`\<`string`\>
-
-Defined in: [index.ts:526](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L526)
-
-Get default folder prefix
-
-## Returns
-
-`Promise`\<`string`\>
-
-Promise resolving to folder prefix or empty string
-
-## Example
-
-```ts
-const folder = await getFolder();
-console.log(`Current folder: ${folder || '(none)'}`);
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / setFolder
-
-# Function: setFolder()
-
-> **setFolder**(`folder`): `Promise`\<`void`\>
-
-Defined in: [index.ts:542](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L542)
-
-Set default folder prefix
-
-When set, all secret lookups without explicit folder (no '/') will
-use this prefix. e.g., getSecret('postgres') becomes getSecret('folder/postgres')
-
-## Parameters
-
-### folder
-
-`string`
-
-Folder path (e.g., "Projects/myapp")
-
-## Returns
-
-`Promise`\<`void`\>
-
-## Example
-
-```ts
-await setFolder('Projects/myapp');
-await getSecret('postgres'); // looks up "Projects/myapp/postgres"
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / getActiveVault
-
-# Function: getActiveVault()
-
-> **getActiveVault**(): `Promise`\<`string`\>
-
-Defined in: [index.ts:465](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L465)
-
-Get active vault ID
-
-## Returns
-
-`Promise`\<`string`\>
-
-Promise resolving to active vault ID
-
-## Example
-
-```ts
-const activeVault = await getActiveVault();
-console.log(`Using vault: ${activeVault}`);
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / getSecretObject
-
-# Function: getSecretObject()
-
-> **getSecretObject**(`itemName`, `options`): `Promise`\<`Record`\<`string`, `string`\>\>
-
-Defined in: [index.ts:271](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L271)
-
-Get all fields from a Vaultwarden item as an object
-
-## Parameters
-
-### itemName
-
-`string`
-
-Name of the Vaultwarden item
-
-### options
-
-[`SecretOptions`](../interfaces/SecretOptions.md) = `{}`
-
-Options for secret retrieval
-
-## Returns
-
-`Promise`\<`Record`\<`string`, `string`\>\>
-
-Promise resolving to object with all fields
-
-## Throws
-
-If vault is locked or item not found
-
-## Example
-
-```ts
-const secrets = await getSecretObject('github-pat');
-// Returns: { username: '...', password: '...', uri: '...', API_KEY: '...' }
-
-const workSecrets = await getSecretObject('work-token', { vault: 'work' });
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / clearFolder
-
-# Function: clearFolder()
-
-> **clearFolder**(): `Promise`\<`void`\>
-
-Defined in: [index.ts:555](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/index.ts#L555)
-
-Clear default folder prefix
-
-After clearing, all lookups use the exact path provided.
-
-## Returns
-
-`Promise`\<`void`\>
-
-## Example
-
-```ts
-await clearFolder();
-await getSecret('postgres'); // looks up "postgres" directly
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / vaultManager
-
-# Variable: vaultManager
-
-> `const` **vaultManager**: `VaultManager`
-
-Defined in: [vault-config.ts:272](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/vault-config.ts#L272)
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / DEFAULT\_TTLS
-
-# Variable: DEFAULT\_TTLS
-
-> `const` **DEFAULT\_TTLS**: `Record`\<[`SecretCategory`](../type-aliases/SecretCategory.md), `number`\>
-
-Defined in: [types.ts:295](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L295)
-
-Default TTLs by secret category (in seconds)
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / secretCache
-
-# Variable: secretCache
-
-> `const` **secretCache**: `SecretCache`
-
-Defined in: [cache.ts:395](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/cache.ts#L395)
-
-Singleton cache instance
-
-Used by default in getSecret() calls.
-
-## Example
-
-```ts
-import { secretCache } from './cache';
-
-const token = await secretCache.get('github-pat.token', 'default');
-```
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / Constants
-
-# Variable: Constants
-
-> `const` **Constants**: `object`
-
-Defined in: [types.ts:361](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L361)
-
-System constants for secrets management
-
-## Type Declaration
-
-### AES\_KEY\_LENGTH
-
-> `readonly` **AES\_KEY\_LENGTH**: `256` = `256`
-
-AES key length in bits
-
-### AUTH\_TAG\_LENGTH
-
-> `readonly` **AUTH\_TAG\_LENGTH**: `16` = `16`
-
-Auth tag length for AES-GCM in bytes
-
-### CACHE\_MAX\_SIZE
-
-> `readonly` **CACHE\_MAX\_SIZE**: `100` = `100`
-
-Maximum cache entries before LRU eviction
-
-### DEFAULT\_KEYCHAIN\_SERVICE
-
-> `readonly` **DEFAULT\_KEYCHAIN\_SERVICE**: `"vaultwarden-secrets"` = `'vaultwarden-secrets'`
-
-Default keychain service name
-
-### DEFAULT\_VAULT\_NAME
-
-> `readonly` **DEFAULT\_VAULT\_NAME**: `"default"` = `'default'`
-
-Default vault name
-
-### IV\_LENGTH
-
-> `readonly` **IV\_LENGTH**: `12` = `12`
-
-IV length for AES-GCM in bytes
-
-### PBKDF2\_ITERATIONS
-
-> `readonly` **PBKDF2\_ITERATIONS**: `100000` = `100000`
-
-PBKDF2 iterations for vault master key derivation
-
-### SALT\_LENGTH
-
-> `readonly` **SALT\_LENGTH**: `32` = `32`
-
-Salt length for PBKDF2 in bytes
-
-### CACHE\_PATH
-
-#### Get Signature
-
-> **get** **CACHE\_PATH**(): `any`
-
-Cache file path
-
-##### Returns
-
-`any`
-
-### CONFIG\_DIR
-
-#### Get Signature
-
-> **get** **CONFIG\_DIR**(): `string`
-
-Configuration directory (can be overridden via VAULTWARDEN_SECRETS_DIR env var)
-
-##### Returns
-
-`string`
-
-### CONFIG\_PATH
-
-#### Get Signature
-
-> **get** **CONFIG\_PATH**(): `any`
-
-Config file path
-
-##### Returns
-
-`any`
-
-### VAULTS\_DIR
-
-#### Get Signature
-
-> **get** **VAULTS\_DIR**(): `any`
-
-Default vaults directory
-
-##### Returns
-
-`any`
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / SecretCategory
-
-# Type Alias: SecretCategory
-
-> **SecretCategory** = `"api_key"` \| `"password"` \| `"token"` \| `"certificate"` \| `"database"` \| `"other"`
-
-Defined in: [types.ts:74](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L74)
-
-Categories of secrets for TTL and access patterns
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / SecretError
-
-# Class: SecretError
-
-Defined in: [types.ts:55](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L55)
-
-Custom error class for secret operations
-
-## Example
-
-```ts
-throw new SecretError(
-  'Secret not found in vault',
-  ErrorCode.SECRET_NOT_FOUND,
-  false
-);
-```
-
-## Extends
-
-- `Error`
-
-## Constructors
-
-### Constructor
-
-> **new SecretError**(`message`, `code`, `retryable`, `cause?`): `SecretError`
-
-Defined in: [types.ts:56](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L56)
-
-#### Parameters
-
-##### message
-
-`string`
-
-##### code
-
-[`ErrorCode`](../enumerations/ErrorCode.md)
-
-##### retryable
-
-`boolean` = `false`
-
-##### cause?
-
-`Error`
-
-#### Returns
-
-`SecretError`
-
-#### Overrides
-
-`Error.constructor`
-
-## Properties
-
-### cause?
-
-> `readonly` `optional` **cause**: `Error`
-
-Defined in: [types.ts:60](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L60)
-
-#### Inherited from
-
-`Error.cause`
-
-***
-
-### code
-
-> `readonly` **code**: [`ErrorCode`](../enumerations/ErrorCode.md)
-
-Defined in: [types.ts:58](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L58)
-
-***
-
-### message
-
-> **message**: `string`
-
-Defined in: node\_modules/typescript/lib/lib.es5.d.ts:1077
-
-#### Inherited from
-
-`Error.message`
-
-***
-
-### name
-
-> **name**: `string`
-
-Defined in: node\_modules/typescript/lib/lib.es5.d.ts:1076
-
-#### Inherited from
-
-`Error.name`
-
-***
-
-### retryable
-
-> `readonly` **retryable**: `boolean` = `false`
-
-Defined in: [types.ts:59](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L59)
-
-***
-
-### stack?
-
-> `optional` **stack**: `string`
-
-Defined in: node\_modules/typescript/lib/lib.es5.d.ts:1078
-
-#### Inherited from
-
-`Error.stack`
-
-***
-
-### stackTraceLimit
-
-> `static` **stackTraceLimit**: `number`
-
-Defined in: node\_modules/@types/node/globals.d.ts:68
-
-The `Error.stackTraceLimit` property specifies the number of stack frames
-collected by a stack trace (whether generated by `new Error().stack` or
-`Error.captureStackTrace(obj)`).
-
-The default value is `10` but may be set to any valid JavaScript number. Changes
-will affect any stack trace captured _after_ the value has been changed.
-
-If set to a non-number value, or set to a negative number, stack traces will
-not capture any frames.
-
-#### Inherited from
-
-`Error.stackTraceLimit`
-
-## Methods
-
-### captureStackTrace()
-
-#### Call Signature
-
-> `static` **captureStackTrace**(`targetObject`, `constructorOpt?`): `void`
-
-Defined in: node\_modules/@types/node/globals.d.ts:52
-
-Creates a `.stack` property on `targetObject`, which when accessed returns
-a string representing the location in the code at which
-`Error.captureStackTrace()` was called.
-
-```js
-const myObject = {};
-Error.captureStackTrace(myObject);
-myObject.stack;  // Similar to `new Error().stack`
-```
-
-The first line of the trace will be prefixed with
-`${myObject.name}: ${myObject.message}`.
-
-The optional `constructorOpt` argument accepts a function. If given, all frames
-above `constructorOpt`, including `constructorOpt`, will be omitted from the
-generated stack trace.
-
-The `constructorOpt` argument is useful for hiding implementation
-details of error generation from the user. For instance:
-
-```js
-function a() {
-  b();
-}
-
-function b() {
-  c();
-}
-
-function c() {
-  // Create an error without stack trace to avoid calculating the stack trace twice.
-  const { stackTraceLimit } = Error;
-  Error.stackTraceLimit = 0;
-  const error = new Error();
-  Error.stackTraceLimit = stackTraceLimit;
-
-  // Capture the stack trace above function b
-  Error.captureStackTrace(error, b); // Neither function c, nor b is included in the stack trace
-  throw error;
-}
-
-a();
-```
-
-##### Parameters
-
-###### targetObject
-
-`object`
-
-###### constructorOpt?
-
-`Function`
-
-##### Returns
-
-`void`
-
-##### Inherited from
-
-`Error.captureStackTrace`
-
-#### Call Signature
-
-> `static` **captureStackTrace**(`targetObject`, `constructorOpt?`): `void`
-
-Defined in: node\_modules/bun-types/globals.d.ts:1042
-
-Create .stack property on a target object
-
-##### Parameters
-
-###### targetObject
-
-`object`
-
-###### constructorOpt?
-
-`Function`
-
-##### Returns
-
-`void`
-
-##### Inherited from
-
-`Error.captureStackTrace`
-
-***
-
-### isError()
-
-#### Call Signature
-
-> `static` **isError**(`error`): `error is Error`
-
-Defined in: node\_modules/typescript/lib/lib.esnext.error.d.ts:23
-
-Indicates whether the argument provided is a built-in Error instance or not.
-
-##### Parameters
-
-###### error
-
-`unknown`
-
-##### Returns
-
-`error is Error`
-
-##### Inherited from
-
-`Error.isError`
-
-#### Call Signature
-
-> `static` **isError**(`value`): `value is Error`
-
-Defined in: node\_modules/bun-types/globals.d.ts:1037
-
-Check if a value is an instance of Error
-
-##### Parameters
-
-###### value
-
-`unknown`
-
-The value to check
-
-##### Returns
-
-`value is Error`
-
-True if the value is an instance of Error, false otherwise
-
-##### Inherited from
-
-`Error.isError`
-
-***
-
-### prepareStackTrace()
-
-> `static` **prepareStackTrace**(`err`, `stackTraces`): `any`
-
-Defined in: node\_modules/@types/node/globals.d.ts:56
-
-#### Parameters
-
-##### err
-
-`Error`
-
-##### stackTraces
-
-`CallSite`[]
-
-#### Returns
-
-`any`
-
-#### See
-
-https://v8.dev/docs/stack-trace-api#customizing-stack-traces
-
-#### Inherited from
-
-`Error.prepareStackTrace`
-
-
-[**vaultwarden-secrets**](../README.md)
-
-***
-
-[vaultwarden-secrets](../README.md) / ErrorCode
-
-# Enumeration: ErrorCode
-
-Defined in: [types.ts:17](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L17)
-
-Error codes for secret operations
-
-## Enumeration Members
-
-### CACHE\_ERROR
-
-> **CACHE\_ERROR**: `"CACHE_ERROR"`
-
-Defined in: [types.ts:41](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L41)
-
-***
-
-### DECRYPTION\_FAILED
-
-> **DECRYPTION\_FAILED**: `"DECRYPTION_FAILED"`
-
-Defined in: [types.ts:31](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L31)
-
-***
-
-### ENCRYPTION\_FAILED
-
-> **ENCRYPTION\_FAILED**: `"ENCRYPTION_FAILED"`
-
-Defined in: [types.ts:30](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L30)
-
-***
-
-### FILE\_SYSTEM\_ERROR
-
-> **FILE\_SYSTEM\_ERROR**: `"FILE_SYSTEM_ERROR"`
-
-Defined in: [types.ts:42](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L42)
-
-***
-
-### INVALID\_CATEGORY
-
-> **INVALID\_CATEGORY**: `"INVALID_CATEGORY"`
-
-Defined in: [types.ts:36](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L36)
-
-***
-
-### INVALID\_KEY
-
-> **INVALID\_KEY**: `"INVALID_KEY"`
-
-Defined in: [types.ts:32](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L32)
-
-***
-
-### INVALID\_PATH
-
-> **INVALID\_PATH**: `"INVALID_PATH"`
-
-Defined in: [types.ts:35](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L35)
-
-***
-
-### KEYCHAIN\_ACCESS\_DENIED
-
-> **KEYCHAIN\_ACCESS\_DENIED**: `"KEYCHAIN_ACCESS_DENIED"`
-
-Defined in: [types.ts:20](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L20)
-
-***
-
-### KEYCHAIN\_COMMAND\_FAILED
-
-> **KEYCHAIN\_COMMAND\_FAILED**: `"KEYCHAIN_COMMAND_FAILED"`
-
-Defined in: [types.ts:21](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L21)
-
-***
-
-### KEYCHAIN\_NOT\_FOUND
-
-> **KEYCHAIN\_NOT\_FOUND**: `"KEYCHAIN_NOT_FOUND"`
-
-Defined in: [types.ts:19](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L19)
-
-***
-
-### SECRET\_NOT\_FOUND
-
-> **SECRET\_NOT\_FOUND**: `"SECRET_NOT_FOUND"`
-
-Defined in: [types.ts:37](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L37)
-
-***
-
-### UNKNOWN\_ERROR
-
-> **UNKNOWN\_ERROR**: `"UNKNOWN_ERROR"`
-
-Defined in: [types.ts:40](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L40)
-
-***
-
-### VAULT\_CORRUPTED
-
-> **VAULT\_CORRUPTED**: `"VAULT_CORRUPTED"`
-
-Defined in: [types.ts:26](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L26)
-
-***
-
-### VAULT\_INVALID\_FORMAT
-
-> **VAULT\_INVALID\_FORMAT**: `"VAULT_INVALID_FORMAT"`
-
-Defined in: [types.ts:27](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L27)
-
-***
-
-### VAULT\_LOCKED
-
-> **VAULT\_LOCKED**: `"VAULT_LOCKED"`
-
-Defined in: [types.ts:25](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L25)
-
-***
-
-### VAULT\_NOT\_FOUND
-
-> **VAULT\_NOT\_FOUND**: `"VAULT_NOT_FOUND"`
-
-Defined in: [types.ts:24](https://github.com/rodaddy/vaultwarden-secrets/blob/HEAD/types.ts#L24)
-<!-- API END -->
+---
 
 ## Testing
 
-Run the test suite:
+```bash
+bun test          # run the suite
+bun run typecheck # tsc --noEmit
+```
+
+The suite spans 29 test files across the library, control plane, rotation engine, authz, identity, middleware, and the MCP contract. Deeper security-profile testing notes: [docs/testing.md](docs/testing.md).
+
+> **Fixture convention:** test fixtures use obviously-fake credential values (`test-`/`fake-` prefixed, e.g. `test-secret`, `test-value-abc`) so secret scanners don't false-positive on the test data. Please keep any new fixtures fake and clearly prefixed.
+
+---
+
+## Contributing & Security
+
+Contributions are welcome. Before opening a PR:
 
 ```bash
 bun test
-```
-
-Run the example:
-
-```bash
-bun run example.ts
-```
-
-Type checking:
-
-```bash
 bun run typecheck
 ```
 
-## Performance
+- Keep all example/fixture credentials **fake** (`test-`/`fake-` prefixed). Never commit real secrets — `.gitignore` already excludes `.env`, `.env.*`, `.master-key`, `.vw-cache.json`, `.bw_session*`, `snapshot.enc`, and `deploy/tls/`.
+- Secret scanning runs in CI via **[betterleaks](https://github.com/betterleaks/betterleaks)** (a FOSS scanner) on every push/PR — see `.github/workflows/security.yml`.
+- Match the existing security posture: default-deny, fail-closed, enumeration parity, no secret material in logs/state/receipts.
 
-### Latency
+**Reporting a vulnerability:** please open a private security report on the repository rather than a public issue.
 
-- **Cache hit:** < 1ms (in-memory decrypt)
-- **Cache miss:** 100–500ms (Bitwarden CLI + network)
-- **First retrieval:** 500ms–2s (vault sync)
-
-### Memory
-
-- Default cache size: 100 entries max
-- Average entry: 0.5–2 KB (depends on secret size)
-- Total typical: 50–200 KB in memory + encrypted file
-
-## Troubleshooting
-
-### "Vault is locked" Error
-
-```bash
-# Unlock the Bitwarden vault
-bw unlock
-
-# Copy the BW_SESSION token and store it:
-# await setSession('default', '<BW_SESSION value>');
-```
-
-### "Secret not found" Error
-
-```bash
-# List available secrets to verify name
-bw list items
-
-# Check custom field name (case-sensitive)
-bw get item "ItemName"  # View full structure
-```
-
-### "Keychain access denied" Error
-
-```bash
-# Check Keychain permission for `security` command
-# Restart the Keychain agent:
-security lock-keychain
-security unlock-keychain -p "YOUR_PASSWORD"
-```
-
-### Cache Corruption
-
-```typescript
-import { clearCache } from 'vaultwarden-secrets';
-
-// Clear all cached data and rebuild from vault
-await clearCache();
-```
-
-## Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Write tests for new functionality
-4. Ensure type checking passes (`bun run typecheck`)
-5. Commit changes (`git commit -m 'Add amazing feature'`)
-6. Push to branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+---
 
 ## License
 
-MIT – See [LICENSE](LICENSE) for details.
-
-## Author
-
-Rico – [GitHub](https://github.com/yourusername)
-
-## Acknowledgments
-
-- [Bitwarden](https://bitwarden.com/) – Open-source password manager
-- [Vaultwarden](https://github.com/dani-garcia/vaultwarden) – Self-hosted Bitwarden server
-- [Bun](https://bun.sh/) – Fast TypeScript runtime
+[MIT](LICENSE) © Rico

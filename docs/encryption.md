@@ -223,7 +223,8 @@ export const SecurityProfiles = {
 
 ```bash
 export SECURITY_PROFILE=openclaw
-export API_TOKEN_CLIENT1="your-token-here"
+export ALLOWED_CERT_FINGERPRINTS="sha256:your-fingerprint"
+export JWT_SECRET="$(openssl rand -hex 32)"
 bun run server
 ```
 
@@ -232,7 +233,9 @@ You'll see:
 Active security layers:
   ✓ IP Whitelist: 127.0.0.1/32
   ✓ Rate Limiting: 30/1m
-  ✓ Bearer Auth: 1 client(s) configured
+  ✓ mTLS: 1 fingerprint(s), mode=proxy
+  ✓ JWT: Required scopes=read:secrets
+  ✓ Combined Auth: mTLS + JWT (defense in depth)
   ✓ Audit Logging: forensic
   ✓ Response Encryption: ECDH P-256 + AES-256-GCM
 ```

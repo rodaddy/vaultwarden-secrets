@@ -1,5 +1,7 @@
 # Tasks: HTTP Secrets Server
 
+> **Historical planning document.** This predates the built system and is kept for provenance. For current behavior see README.md and docs/.
+
 **Status:** In Progress
 **Updated:** 2026-02-04
 

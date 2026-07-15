@@ -268,7 +268,7 @@ sudo tail -f /var/log/nginx/error.log
 ```bash
 # Download new release
 cd /tmp
-wget https://github.com/yourusername/vaultwarden-secrets/releases/download/vX.Y.Z/vaultwarden-secrets-vX.Y.Z.tar.gz
+wget https://github.com/rodaddy/vaultwarden-secrets/releases/download/vX.Y.Z/vaultwarden-secrets-vX.Y.Z.tar.gz
 
 # Stop service
 sudo systemctl stop vaultwarden-secrets
@@ -427,5 +427,5 @@ services:
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/yourusername/vaultwarden-secrets/issues
+- GitHub Issues: https://github.com/rodaddy/vaultwarden-secrets/issues
 - Documentation: server/README.md

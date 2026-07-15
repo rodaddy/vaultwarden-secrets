@@ -1,10 +1,17 @@
 # Security Testing Report
 
+> **Point-in-time report (2026-02-05).** The counts and findings below are a
+> snapshot from a manual black-box audit and are kept for provenance. The suite
+> has grown substantially since; the current unit suite is the source of truth.
+> Run `bun test` for the live count (as of this doc's last audit: 437 tests
+> across 29 files). Test fixtures use obviously-fake values (`test-`/`fake-`
+> prefixed, e.g. `test-token`, `test-secret`) so secret scanners don't flag them.
+
 Comprehensive end-to-end security testing of all four security profiles.
 
 **Test Date:** 2026-02-05
 **Methodology:** Black-box testing, attack simulation, audit log analysis
-**Total Tests:** 117 E2E + 144 unit = 261 tests
+**Total Tests:** 117 E2E + 144 unit = 261 tests (historical — see banner above)
 
 ---
 
