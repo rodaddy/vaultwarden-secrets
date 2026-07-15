@@ -253,6 +253,6 @@ Suitable for:
 
 - [Security Profiles](../server/README.md#security-profiles)
 - [mTLS Setup Guide](./mtls-setup.md)
-- [Response Encryption](./response-encryption.md)
+- [Response Encryption](./encryption.md)
 - [JWT Utilities](../server/utils/jwt.ts)
 - [OpenSSL Certificate Management](https://www.openssl.org/docs/)
