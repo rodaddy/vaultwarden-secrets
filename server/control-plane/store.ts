@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { appendAudit, verifyLedger, type LedgerVerification } from "./audit";
+import {
+  appendAudit,
+  looksLikeSecretValue,
+  verifyLedger,
+  type LedgerVerification,
+} from "./audit";
 import {
   ControlPlaneDatabase,
   type ControlPlaneDbOptions,
@@ -83,6 +88,8 @@ function redactedEvidence(
     }
     if (typeof value !== "string")
       throw new Error("Reconciliation evidence must be strings");
+    if (looksLikeSecretValue(value))
+      throw new Error("Sensitive reconciliation evidence rejected");
   }
   return evidence;
 }

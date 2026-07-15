@@ -111,6 +111,19 @@ export async function deliverPending(
       )
       .run(leaseUntil, row.id, now, now);
     if (claimed.changes !== 1) continue;
+    const priorDelivery = tx
+      .query(
+        `SELECT id FROM outbox_events
+        WHERE dedupe_key = ? AND state = 'delivered' AND id <> ? LIMIT 1`,
+      )
+      .get(row.dedupe_key, row.id) as { id: string } | null;
+    if (priorDelivery) {
+      tx.query(
+        `UPDATE outbox_events SET state = 'delivered', delivered_at = ?, processing_until = NULL,
+        last_error = NULL WHERE id = ?`,
+      ).run(new Date(now).toISOString(), row.id);
+      continue;
+    }
     const event = toEvent({
       ...row,
       state: "delivering",

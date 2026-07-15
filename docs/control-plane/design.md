@@ -12,7 +12,8 @@ keys are enabled, and every numbered `NNN_*.sql` migration is recorded in
   It never accepts or stores payload bytes.
 - `secret_aliases` points to a concrete version. `latest` is automatically moved
   with the insertion of each new version. A destroyed version has its
-  `payload_ref` scrubbed and aliases cannot resolve it.
+  `payload_ref` scrubbed and aliases cannot resolve it. Destruction refuses while
+  any non-`latest` alias still targets that version.
 - `policy_references` is a non-secret association surface for the later authz
   slice. `idempotency_keys` returns the original result for safe retries.
 - `operations` records cross-store intent as `pending`, `committed`, or
@@ -38,10 +39,15 @@ including through an alias.
 
 The append-only `audit_ledger` stores actor, action, resource, outcome,
 correlation ID, timestamp, predecessor hash, and `sha256(prevHash || row)`.
-Sensitive key names are rejected before audit or outbox serialization.
-`verifyLedger()` detects hash changes and sequence gaps.
+`ledger_head` is updated in that same transaction, so audit sequences never reuse
+deleted numbers and verification detects a truncated tail as well as hash changes
+and gaps. Sensitive key names and obvious secret-shaped values are rejected before
+audit or outbox serialization. Payload references must be either
+`vaultwarden:<id>` or `<item>.<fieldpath>` and never raw payload material.
 
-`outbox_events` is the durable lifecycle delivery queue. Events have a stable
-consumer dedupe key, a lease for crash recovery, bounded exponential retries,
-and a visible `dead-letter` terminal state. Event bodies are metadata-only and
-use the same sensitive-field guard as audit records.
+`outbox_events` is the durable lifecycle delivery queue. Events have a unique row
+ID per emission and a non-unique consumer dedupe key, so repeat lifecycle changes
+remain durable while delivery skips a key already delivered. Events use a lease
+for crash recovery, bounded exponential retries, and a visible `dead-letter`
+terminal state. Event bodies are metadata-only and use the same sensitive-field
+guard as audit records.

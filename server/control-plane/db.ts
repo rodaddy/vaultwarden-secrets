@@ -20,6 +20,7 @@ function defaultStateDir(): string {
 export class ControlPlaneDatabase {
   readonly db: Database;
   readonly path: string;
+  private transactionDepth = 0;
 
   constructor(options: ControlPlaneDbOptions = {}) {
     this.path =
@@ -34,7 +35,9 @@ export class ControlPlaneDatabase {
   }
 
   transaction<T>(work: (tx: ControlPlaneTx) => T): T {
+    if (this.transactionDepth > 0) return this.savepoint(work);
     this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth += 1;
     try {
       const result = work(this.db);
       this.db.exec("COMMIT");
@@ -42,6 +45,8 @@ export class ControlPlaneDatabase {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.transactionDepth -= 1;
     }
   }
 
@@ -79,5 +84,22 @@ export class ControlPlaneDatabase {
         ).run(version, migration.name, new Date().toISOString());
       }
     });
+  }
+
+  private savepoint<T>(work: (tx: ControlPlaneTx) => T): T {
+    const name = `control_plane_${this.transactionDepth}`;
+    this.db.exec(`SAVEPOINT ${name}`);
+    this.transactionDepth += 1;
+    try {
+      const result = work(this.db);
+      this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      return result;
+    } catch (error) {
+      this.db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
+      this.db.exec(`RELEASE SAVEPOINT ${name}`);
+      throw error;
+    } finally {
+      this.transactionDepth -= 1;
+    }
   }
 }

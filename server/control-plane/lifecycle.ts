@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { assertRedacted } from "./audit";
+import { assertRedacted, looksLikeSecretValue } from "./audit";
 import type { ControlPlaneTx } from "./db";
 import type { ControlPlaneStore } from "./store";
 import type { SecretMeta, VersionMeta, VersionState } from "./types";
@@ -62,6 +62,20 @@ function resource(secret: string): string {
 }
 function requireText(value: string, field: string): void {
   if (!value.trim()) throw new Error(`${field} is required`);
+}
+
+function validatePayloadRef(value: string): void {
+  requireText(value, "payloadRef");
+  if (/\s/.test(value) || looksLikeSecretValue(value))
+    throw new Error("payloadRef must be a non-secret reference");
+  if (
+    !/^vaultwarden:[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value) &&
+    !/^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$/.test(value)
+  ) {
+    throw new Error(
+      "payloadRef must be vaultwarden:<id> or <item>.<fieldpath>",
+    );
+  }
 }
 
 function validateLabels(labels: Record<string, string>): void {
@@ -215,7 +229,7 @@ export function addVersion(
   input: AddVersionInput,
 ): VersionMeta {
   requireText(input.secret, "secret");
-  requireText(input.payloadRef, "payloadRef");
+  validatePayloadRef(input.payloadRef);
   requireText(input.checksum, "checksum");
   return store.transaction((tx) =>
     idempotent(tx, input.idempotencyKey, "version.add", () => {
@@ -310,6 +324,18 @@ function transition(
     }
     const now = new Date().toISOString();
     const payloadRef = to === "DESTROYED" ? null : current.payload_ref;
+    if (to === "DESTROYED") {
+      const alias = tx
+        .query(
+          `SELECT alias FROM secret_aliases
+          WHERE secret_name = ? AND version = ? AND alias <> 'latest' LIMIT 1`,
+        )
+        .get(secret, version) as { alias: string } | null;
+      if (alias)
+        throw new Error(
+          `Cannot destroy version targeted by alias: ${alias.alias}`,
+        );
+    }
     tx.query(
       "UPDATE secret_versions SET state = ?, payload_ref = ? WHERE secret_name = ? AND version = ?",
     ).run(to, payloadRef, secret, version);
@@ -395,13 +421,20 @@ export function importLegacy(
   input: ImportLegacyInput,
 ): SecretMeta {
   requireText(input.name, "name");
-  requireText(input.payloadRef, "payloadRef");
+  validatePayloadRef(input.payloadRef);
   requireText(input.checksum, "checksum");
   requireText(input.importedFrom, "importedFrom");
   const key =
     input.idempotencyKey ?? `legacy-import:${input.name}:${input.payloadRef}`;
-  return store.transaction((tx) =>
-    idempotent(tx, key, "secret.import", () => {
+  return store.transaction((tx) => {
+    const existing = tx
+      .query("SELECT * FROM logical_secrets WHERE name = ?")
+      .get(input.name) as SecretRow | null;
+    if (existing && existing.imported_from !== input.importedFrom)
+      throw new Error(
+        `Secret already exists with different provenance: ${input.name}`,
+      );
+    return idempotent(tx, key, "secret.import", () => {
       const existing = tx
         .query("SELECT * FROM logical_secrets WHERE name = ?")
         .get(input.name) as SecretRow | null;
@@ -438,6 +471,6 @@ export function importLegacy(
         meta.id,
       );
       return meta;
-    }),
-  );
+    });
+  });
 }
