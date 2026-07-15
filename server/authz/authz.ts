@@ -76,12 +76,18 @@ export class AuthorizationEngine {
     if (!isRequestWellFormed(request))
       return { allow: false, reason: "malformed" };
     const policies = this.policyStore.listPolicies(request.subject);
-    if (policies.some(isMalformedPolicy))
-      return { allow: false, reason: "malformed" };
-    const matches = policies.filter((policy) =>
+    const validPolicies = policies.filter(
+      (policy) => !isMalformedPolicy(policy),
+    );
+    const matches = validPolicies.filter((policy) =>
       policyMatches(policy, request.subject, request.action, request.resource),
     );
-    if (matches.length === 0) return { allow: false, reason: "no-policy" };
+    if (matches.length === 0)
+      return {
+        allow: false,
+        reason:
+          validPolicies.length === policies.length ? "no-policy" : "malformed",
+      };
 
     const hasAllow = matches.some((policy) => policy.effect === "allow");
     const hasDeny = matches.some((policy) => policy.effect === "deny");
@@ -124,7 +130,9 @@ function isResourceTarget(value: unknown): value is string {
 function isMalformedPolicy(policy: StoredPolicy): boolean {
   return (
     typeof policy.id !== "string" ||
+    policy.id.length === 0 ||
     typeof policy.subject !== "string" ||
+    policy.subject.length === 0 ||
     !isResourcePattern(policy.resourcePattern) ||
     !Array.isArray(policy.actions) ||
     policy.actions.length === 0 ||

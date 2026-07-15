@@ -10,7 +10,7 @@ Supported actions are `secret.get`, `secret.list`, `secret.create`, `secret.addV
 
 Precedence is fail closed:
 
-1. A malformed request or any malformed policy returned for the subject denies with `reason: 'malformed'`.
+1. A malformed request denies with `reason: 'malformed'`. A malformed stored policy cannot match or grant; when it leaves no valid matching policy, the request denies with `reason: 'malformed'`.
 2. No matching rule denies with `reason: 'no-policy'`.
 3. A matching allow and deny are conflicting and deny with `reason: 'ambiguous'`. This is the conservative form of explicit-deny precedence.
 4. A matching deny denies; matching allows without a deny allow.
@@ -52,3 +52,9 @@ if (!decision.allow) {
 ```
 
 For list, reconciliation, rotation, and policy-wide operations, use `resource: '*'`. The wiring must use this constant-shape early return before any resource lookup or version resolution, and should avoid distinguishable extra work on denial paths. It must never expose `Decision.reason` to callers; the reason is audit-only.
+
+## Integration acceptance criteria (owned by pilot/wiring pass)
+
+For the get, list, and fields REST endpoints, every authorization denial and every backend or lookup error (including a secret-not-found result or database error) MUST use one canonical, byte-identical `404` response body: `{"error":"Secret not found"}`. No raw `Error.message` may ever appear in that response.
+
+No conditional `503`, or any other status or body, may distinguish denied, not-found, and backend-error cases: all three MUST be indistinguishable to callers. The pilot/wiring pass MUST add REST-boundary byte-equivalence tests proving that each case returns the identical status code and identical response-body bytes.
