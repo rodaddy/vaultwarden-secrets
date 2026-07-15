@@ -2,6 +2,16 @@
 
 Step-by-step guide for deploying the HTTP secrets server to production.
 
+> **Retired deployment trigger:** The unauthenticated automatic network deploy
+> trigger that listened on port 3002 has been removed and must not be restored.
+> Replacement release automation is deferred to issues #14 and #15. The active
+> MCP service on port 3001 is preserved and is not retired by this change.
+> On every run, `deploy/deploy.sh` disables, stops, and removes the exact
+> retired `vw-deploy-webhook.service` copy, then reloads systemd before checking
+> for source changes. When changes are present, it restarts only the protected
+> MCP service on port 3001; the port-3000 and port-3003 services remain
+> contained until the hard reactivation gate is approved.
+
 ## Prerequisites
 
 - Bun runtime installed (`curl -fsSL https://bun.sh/install | bash`)

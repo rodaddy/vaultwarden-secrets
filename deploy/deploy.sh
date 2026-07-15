@@ -6,8 +6,19 @@ set -eu
 
 REPO_DIR="/opt/vaultwarden-secrets"
 BRANCH="${DEPLOY_BRANCH:-develop}"
+RETIRED_UNIT="vw-deploy-webhook.service"
+RETIRED_UNIT_PATH="/etc/systemd/system/$RETIRED_UNIT"
 
 cd "$REPO_DIR"
+
+# Retire the removed unauthenticated network deploy trigger even when the
+# repository is already current.
+systemctl disable --now "$RETIRED_UNIT" >/dev/null 2>&1 || true
+if [ -e "$RETIRED_UNIT_PATH" ] || [ -L "$RETIRED_UNIT_PATH" ]; then
+  rm -f "$RETIRED_UNIT_PATH"
+  echo "[deploy] Removed retired $RETIRED_UNIT"
+fi
+systemctl daemon-reload
 
 # Fetch latest
 GIT_SSH_COMMAND="ssh -i /root/.ssh/id_ed25519_github -o StrictHostKeyChecking=accept-new" \
@@ -37,9 +48,8 @@ for unit in deploy/systemd/*.service; do
 done
 systemctl daemon-reload
 
-# Restart services
-systemctl restart vaultwarden-secrets.service
+# Restart only the protected compatibility service. Ports 3000 and 3003 remain
+# contained until the hard reactivation gate is approved.
 systemctl restart vaultwarden-secrets-mcp.service
-systemctl restart vw-cred-proxy.service 2>/dev/null || true
 
-echo "[deploy] Services restarted"
+echo "[deploy] Protected MCP service restarted"
