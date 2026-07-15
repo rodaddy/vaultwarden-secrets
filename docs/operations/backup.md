@@ -4,7 +4,7 @@ The backup job packages the control-plane state directory, including its token s
 
 ## Configuration and schedule
 
-Install `deploy/systemd/vw-backup.service` and `vw-backup.timer`, then place configuration in `/etc/vaultwarden-secrets/backup.env`. The timer runs daily with up to 15 minutes of jitter as the unprivileged `vaultwarden-secrets` user. The unit declares `HOME` and `PATH` because systemd does not inherit an interactive shell environment.
+Install `deploy/systemd/vw-backup.service` and `vw-backup.timer`, then place configuration in `/etc/vaultwarden-secrets/backup.env`. The timer runs daily with up to 15 minutes of jitter as the unprivileged `vwsecrets` service user (the same identity created by the hardened runtime envelope; provisioning of that user and its `bun` at `/usr/local/bin` is owned by `docs/runtime/envelope.md`). The unit declares `HOME` and `PATH` because systemd does not inherit an interactive shell environment.
 
 ```text
 VW_STATE_DIR=/var/lib/vaultwarden-secrets/state

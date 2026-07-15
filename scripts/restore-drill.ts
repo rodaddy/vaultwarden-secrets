@@ -1,6 +1,13 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   decryptFile,
   loadBackupKey,
@@ -40,9 +47,10 @@ export async function restoreDrill(options: {
   const target = resolve(
     options.targetDir ?? (await mkdtemp(join(tmpdir(), "vw-restore-drill-"))),
   );
-  if (target === liveState)
-    throw new Error("refusing to restore into the live state directory");
   await mkdir(target, { recursive: true, mode: 0o700 });
+  // Resolve symlinks before comparing so a symlinked or relative target cannot
+  // smuggle the drill into the live state directory.
+  await assertOutsideLiveState(target, liveState, "restore target");
   if ((await readdir(target)).length !== 0)
     throw new Error("restore target must be empty");
 
@@ -86,9 +94,11 @@ export async function restoreDrill(options: {
   const receiptsDir = resolve(
     options.receiptsDir ??
       process.env.VW_BACKUP_RECEIPTS_DIR ??
-      join(stateDirFromEnv(), "receipts"),
+      join(dirname(target), "receipts"),
   );
   await mkdir(receiptsDir, { recursive: true, mode: 0o700 });
+  // Receipts must never land inside the live state directory either.
+  await assertOutsideLiveState(receiptsDir, liveState, "receipts directory");
   const receiptPath = join(
     receiptsDir,
     `restore-drill-${now
@@ -100,6 +110,36 @@ export async function restoreDrill(options: {
     mode: 0o600,
   });
   return { receipt, receiptPath, targetDir: target };
+}
+
+// Resolve symlinks on the deepest existing ancestor of `path` (the leaf may not
+// exist yet) and refuse if the result is the live state dir or nested inside it.
+async function assertOutsideLiveState(
+  path: string,
+  liveState: string,
+  label: string,
+): Promise<void> {
+  const liveReal = await realpathOfNearest(liveState);
+  const targetReal = await realpathOfNearest(path);
+  if (targetReal === liveReal || targetReal.startsWith(`${liveReal}${sep}`))
+    throw new Error(`refusing to use ${label} inside the live state directory`);
+}
+
+async function realpathOfNearest(path: string): Promise<string> {
+  let current = resolve(path);
+  // Walk up to the nearest existing ancestor, then realpath that.
+  for (;;) {
+    try {
+      const real = await realpath(current);
+      return current === resolve(path)
+        ? real
+        : join(real, relative(current, resolve(path)));
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      current = parent;
+    }
+  }
 }
 
 async function verifySqliteFiles(

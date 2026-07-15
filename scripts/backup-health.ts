@@ -32,16 +32,11 @@ export async function checkBackupHealth(
       parseThreshold(process.env.VW_BACKUP_MAX_AGE_HOURS);
     const now = options.now ?? new Date();
     work = await mkdtemp(join(tmpdir(), "vw-backup-health-"));
+    // mtime only selects the newest candidate; freshness is judged from the
+    // authenticated manifest.createdAt so a touched/copied stale backup cannot
+    // report healthy.
     const newest = await newestBackup(destination, work);
     if (!newest) return { healthy: false, reason: "no backup found" };
-    const ageHours = (now.getTime() - newest.modifiedAt.getTime()) / 3_600_000;
-    if (ageHours > maxAgeHours)
-      return {
-        healthy: false,
-        backup: newest.displayPath,
-        ageHours,
-        reason: `backup is older than ${maxAgeHours} hours`,
-      };
     const key = await loadBackupKey(options.keyFile);
     const tarPath = join(work, "backup.tar");
     const extracted = join(work, "extracted");
@@ -56,7 +51,22 @@ export async function checkBackupHealth(
       "--no-same-owner",
       "--no-same-permissions",
     ]);
-    await verifyExtractedManifest(extracted);
+    const manifest = await verifyExtractedManifest(extracted);
+    const createdAt = Date.parse(manifest.createdAt);
+    if (!Number.isFinite(createdAt))
+      return {
+        healthy: false,
+        backup: newest.displayPath,
+        reason: "backup manifest has an invalid createdAt",
+      };
+    const ageHours = (now.getTime() - createdAt) / 3_600_000;
+    if (ageHours > maxAgeHours)
+      return {
+        healthy: false,
+        backup: newest.displayPath,
+        ageHours,
+        reason: `backup is older than ${maxAgeHours} hours`,
+      };
     return { healthy: true, backup: newest.displayPath, ageHours };
   } catch (error) {
     return {

@@ -222,11 +222,19 @@ export async function pruneBackups(
     if (!BACKUP_PATTERN.test(name)) continue;
     const path = join(directory, name);
     if ((await stat(path)).mtimeMs < cutoff) {
+      assertBackupName(path);
       await Bun.file(path).delete();
       pruned.push(path);
     }
   }
   return pruned;
+}
+
+// Defence in depth: never unlink a file whose basename is not a strict backup
+// name, even if an upstream glob/filter matched it more loosely.
+function assertBackupName(path: string): void {
+  if (!BACKUP_PATTERN.test(basename(path)))
+    throw new Error(`refusing to delete non-backup file: ${path}`);
 }
 
 async function stageState(source: string, staged: string): Promise<void> {
@@ -314,7 +322,10 @@ async function pruneRemoteBackups(
         ? [path]
         : [];
     });
-  for (const path of stale) await run(["ssh", host, "unlink", path]);
+  for (const path of stale) {
+    assertBackupName(path);
+    await run(["ssh", host, "unlink", path]);
+  }
   return stale;
 }
 

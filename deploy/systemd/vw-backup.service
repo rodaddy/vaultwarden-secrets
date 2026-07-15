@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=vaultwarden-secrets
-Group=vaultwarden-secrets
+User=vwsecrets
+Group=vwsecrets
 WorkingDirectory=/opt/vaultwarden-secrets
 Environment="HOME=/var/lib/vaultwarden-secrets"
-Environment="PATH=/var/lib/vaultwarden-secrets/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/etc/vaultwarden-secrets/backup.env
 ExecStart=/usr/bin/env bun run scripts/backup.ts
 NoNewPrivileges=true
