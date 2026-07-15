@@ -50,6 +50,7 @@ import { AuthorizationEngine } from "./authz/authz";
 import {
   buildRotationEngine,
   resolveConnector,
+  resolveSupersededRefs,
   VaultWriterAdapter,
   VaultReaderAdapter,
   SystemdConsumerReloader,
@@ -680,14 +681,6 @@ function createMcpServer(subject: string): McpServer {
           .string()
           .optional()
           .describe("Alias to move on publish (default: 'current')"),
-        oldProviderRef: z
-          .string()
-          .optional()
-          .describe("Provider handle of the credential being superseded"),
-        oldPayloadRef: z
-          .string()
-          .optional()
-          .describe("Vault ref of the credential being superseded"),
       },
       { destructiveHint: true, idempotentHint: true },
       async ({
@@ -697,8 +690,6 @@ function createMcpServer(subject: string): McpServer {
         consumers,
         idempotencyKey,
         alias,
-        oldProviderRef,
-        oldPayloadRef,
       }) => {
         try {
           const infra = getRotationInfra();
@@ -720,6 +711,16 @@ function createMcpServer(subject: string): McpServer {
             }),
           });
 
+          // SECURITY (F1): the revoke target (a provider-side DELETE) is
+          // derived from TRUSTED server state -- the prior completed rotation
+          // job for THIS secret -- never from the request. A caller authorized
+          // to rotate secretA can therefore never cause a GET/DELETE against an
+          // unrelated provider credential id.
+          const superseded = resolveSupersededRefs(
+            infra.rotationDb,
+            credential,
+          );
+
           // Redacted receipt: identifiers/hashes only (the type is already
           // redacted). Subject is the authenticated workload identity; the
           // engine authorizes rotate/move-alias/revoke via default-deny authz.
@@ -731,8 +732,8 @@ function createMcpServer(subject: string): McpServer {
             idempotencyKey,
             subject,
             alias,
-            oldProviderRef: oldProviderRef ?? null,
-            oldPayloadRef: oldPayloadRef ?? null,
+            oldProviderRef: superseded.oldProviderRef,
+            oldPayloadRef: superseded.oldPayloadRef,
           });
           return json(receipt);
         } catch (error) {

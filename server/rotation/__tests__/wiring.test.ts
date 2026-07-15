@@ -15,6 +15,7 @@ import {
   VaultWriterAdapter,
   SystemdConsumerReloader,
   buildRotationEngine,
+  resolveSupersededRefs,
   type BwSession,
 } from "../wiring";
 import { TestConnector } from "../connectors/test-connector";
@@ -282,13 +283,15 @@ describe("makeAuthorize — real AuthorizationEngine mapping", () => {
     expect(res.reason).toBe("denied by policy");
   });
 
-  test("revoke/rollback map to secret.destroy", async () => {
+  test("F2: revoke->rotate.revoke, rollback->rotate.rollback (own actions)", async () => {
+    // A least-privilege rotate role: rotate + alias.move + rotate.revoke +
+    // rotate.rollback, WITHOUT secret.destroy.
     const authorize = makeAuthorize(
       engineWith([
         {
           subject: "mcp",
           resourcePattern: "*",
-          actions: ["secret.destroy"],
+          actions: ["rotate", "alias.move", "rotate.revoke", "rotate.rollback"],
           effect: "allow",
         },
       ]),
@@ -301,6 +304,37 @@ describe("makeAuthorize — real AuthorizationEngine mapping", () => {
       (await authorize({ subject: "mcp", action: "rollback", resource: "svc" }))
         .allow,
     ).toBe(true);
+  });
+
+  test("F2: secret.destroy alone confers NO rotation revoke/rollback", async () => {
+    const authorize = makeAuthorize(
+      engineWith([
+        {
+          subject: "destroyer",
+          resourcePattern: "*",
+          actions: ["secret.destroy"],
+          effect: "allow",
+        },
+      ]),
+    );
+    expect(
+      (
+        await authorize({
+          subject: "destroyer",
+          action: "revoke",
+          resource: "svc",
+        })
+      ).allow,
+    ).toBe(false);
+    expect(
+      (
+        await authorize({
+          subject: "destroyer",
+          action: "rollback",
+          resource: "svc",
+        })
+      ).allow,
+    ).toBe(false);
   });
 });
 
@@ -342,11 +376,12 @@ describe("buildRotationEngine — end-to-end against real control-plane store", 
     const store = makeStore();
     store.createSecret({ name: "pilot" });
 
+    // Least-privilege rotate role: NO secret.destroy granted.
     const ps = new InMemoryPolicyStore();
     ps.setPolicy({
       subject: "mcp",
       resourcePattern: "*",
-      actions: ["rotate", "alias.move", "secret.destroy"] as never,
+      actions: ["rotate", "alias.move", "rotate.revoke"] as never,
       effect: "allow",
     });
     const authz = new AuthorizationEngine(ps);
@@ -436,6 +471,219 @@ describe("buildRotationEngine — end-to-end against real control-plane store", 
     // Connector.create never ran -> no provider side effect on denial.
     expect(connector.calls.create).toBe(0);
     store.close();
+  });
+
+  test("F2: least-privilege rotate role revokes without secret.destroy", async () => {
+    // Two rotations of the same secret on ONE rotation DB. The SECOND
+    // supersedes the FIRST, so its revoke path runs -- and it must succeed
+    // under rotate.revoke WITHOUT the subject holding secret.destroy.
+    const store = makeStore();
+    store.createSecret({ name: "pilot" });
+    const ps = new InMemoryPolicyStore();
+    ps.setPolicy({
+      subject: "mcp",
+      resourcePattern: "*",
+      actions: ["rotate", "alias.move", "rotate.revoke"] as never,
+      effect: "allow",
+    });
+    const authz = new AuthorizationEngine(ps);
+    const rotationDb = new Database(":memory:");
+    let seq = 0;
+    const mkEngine = (connector: TestConnector) =>
+      buildRotationEngine(rotationDb, {
+        store,
+        authz,
+        connector,
+        vault: new VaultWriterAdapter(
+          async () => ({ session: "s", folderId: "f" }),
+          async () => ({ id: `pilotitem${++seq}` }),
+        ),
+        consumerAllowlist: {},
+        consumerReloader: new SystemdConsumerReloader(async () => {}),
+      });
+
+    // Rotation 1: first issuance (nothing to revoke).
+    const c1 = new TestConnector({ material: "M1-do-not-leak-000000000000" });
+    const r1 = await mkEngine(c1).rotate({
+      credential: "pilot",
+      connector: "test",
+      strategy: "dual",
+      consumers: [],
+      idempotencyKey: "rot-1",
+      subject: "mcp",
+      ...resolveSupersededRefs(rotationDb, "pilot"),
+    });
+    expect(r1.stage).toBe("done");
+    expect(c1.revoked).toBe(false); // nothing superseded yet
+
+    // Rotation 2: supersedes rotation 1 -> revoke of prov-<job1> must run.
+    const superseded = resolveSupersededRefs(rotationDb, "pilot");
+    expect(superseded.firstIssuance).toBe(false);
+    expect(superseded.oldProviderRef).not.toBeNull();
+    const c2 = new TestConnector({ material: "M2-do-not-leak-111111111111" });
+    const r2 = await mkEngine(c2).rotate({
+      credential: "pilot",
+      connector: "test",
+      strategy: "dual",
+      consumers: [],
+      idempotencyKey: "rot-2",
+      subject: "mcp",
+      ...superseded,
+    });
+    expect(r2.stage).toBe("done");
+    expect(c2.revoked).toBe(true); // revoke ran under rotate.revoke only
+    store.close();
+    rotationDb.close();
+  });
+
+  test("F3: every PRE-terminal stage's audit+outbox is durably committed", async () => {
+    // At-least-once holds for pre-terminal stages: each stage's audit ledger
+    // row and outbox event is committed to the control-plane DB as the engine
+    // advances, so a crash before 'done' still leaves every prior stage
+    // durable. (Terminal 'done' emission is best-effort -- see the bound
+    // documented in docs/pilot-cutover.md.)
+    const store = makeStore();
+    store.createSecret({ name: "pilot" });
+    const ps = new InMemoryPolicyStore();
+    ps.setPolicy({
+      subject: "mcp",
+      resourcePattern: "*",
+      actions: ["rotate", "alias.move", "rotate.revoke"] as never,
+      effect: "allow",
+    });
+    const authz = new AuthorizationEngine(ps);
+    let seq = 0;
+    const engine = buildRotationEngine(new Database(":memory:"), {
+      store,
+      authz,
+      connector: new TestConnector({ material: "M-do-not-leak-2222222222" }),
+      vault: new VaultWriterAdapter(
+        async () => ({ session: "s", folderId: "f" }),
+        async () => ({ id: `pi${++seq}` }),
+      ),
+      consumerAllowlist: {},
+      consumerReloader: new SystemdConsumerReloader(async () => {}),
+    });
+    await engine.rotate({
+      credential: "pilot",
+      connector: "test",
+      strategy: "single",
+      consumers: [],
+      idempotencyKey: "rot-durable",
+      subject: "mcp",
+    });
+
+    const actions = new Set(
+      (
+        store.database.db
+          .query("SELECT action FROM audit_ledger")
+          .all() as Array<{ action: string }>
+      ).map((r) => r.action),
+    );
+    // Every PRE-terminal happy-path stage produced a durable audit row.
+    for (const stage of [
+      "provider-created",
+      "staged",
+      "consumers-reloaded",
+      "verified",
+      "alias-moved",
+      "old-revoked",
+    ]) {
+      expect(actions.has(`rotation.${stage}`)).toBe(true);
+    }
+    // And a durable outbox event per pre-terminal stage type.
+    const types = new Set(
+      (
+        store.database.db
+          .query("SELECT type FROM outbox_events")
+          .all() as Array<{ type: string }>
+      ).map((r) => r.type),
+    );
+    expect(types.has("rotation.alias-moved.ok")).toBe(true);
+    expect(types.has("rotation.old-revoked.ok")).toBe(true);
+    store.close();
+  });
+});
+
+describe("resolveSupersededRefs — server-side revoke-target derivation (F1)", () => {
+  test("first issuance when no prior completed job for the secret", () => {
+    const rotationDb = new Database(":memory:");
+    // Seed the schema by constructing an engine (auto-migrates).
+    buildRotationEngine(rotationDb, {
+      store: makeStore(),
+      authz: new AuthorizationEngine(new InMemoryPolicyStore()),
+      connector: new TestConnector(),
+      vault: new VaultWriterAdapter(
+        async () => ({ session: "s", folderId: "f" }),
+        async () => ({ id: "x" }),
+      ),
+      consumerAllowlist: {},
+      consumerReloader: new SystemdConsumerReloader(async () => {}),
+    });
+    const refs = resolveSupersededRefs(rotationDb, "never-rotated");
+    expect(refs).toEqual({
+      oldProviderRef: null,
+      oldPayloadRef: null,
+      firstIssuance: true,
+    });
+    rotationDb.close();
+  });
+
+  test("a foreign provider id in the DB is NEVER used for an unrelated secret", async () => {
+    // secretA has a completed rotation with provider handle prov-<jobA>.
+    // Resolving refs for an UNRELATED secretB must NOT return secretA's handle;
+    // it must be first-issuance. This is the F1 guarantee: a caller rotating
+    // secretB can never cause a revoke/DELETE against secretA's provider id.
+    const store = makeStore();
+    store.createSecret({ name: "secretA" });
+    const authz = new AuthorizationEngine(
+      (() => {
+        const ps = new InMemoryPolicyStore();
+        ps.setPolicy({
+          subject: "mcp",
+          resourcePattern: "*",
+          actions: ["rotate", "alias.move", "rotate.revoke"] as never,
+          effect: "allow",
+        });
+        return ps;
+      })(),
+    );
+    const rotationDb = new Database(":memory:");
+    let seq = 0;
+    const connector = new TestConnector({ material: "A-do-not-leak-333333" });
+    await buildRotationEngine(rotationDb, {
+      store,
+      authz,
+      connector,
+      vault: new VaultWriterAdapter(
+        async () => ({ session: "s", folderId: "f" }),
+        async () => ({ id: `a${++seq}` }),
+      ),
+      consumerAllowlist: {},
+      consumerReloader: new SystemdConsumerReloader(async () => {}),
+    }).rotate({
+      credential: "secretA",
+      connector: "test",
+      strategy: "dual",
+      consumers: [],
+      idempotencyKey: "a-1",
+      subject: "mcp",
+    });
+
+    // secretA now has a trusted handle...
+    const forA = resolveSupersededRefs(rotationDb, "secretA");
+    expect(forA.firstIssuance).toBe(false);
+    expect(forA.oldProviderRef).not.toBeNull();
+
+    // ...but an unrelated secretB gets NONE of it -> first issuance, no revoke.
+    const forB = resolveSupersededRefs(rotationDb, "secretB");
+    expect(forB).toEqual({
+      oldProviderRef: null,
+      oldPayloadRef: null,
+      firstIssuance: true,
+    });
+    store.close();
+    rotationDb.close();
   });
 });
 

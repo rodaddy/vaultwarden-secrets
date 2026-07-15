@@ -6,7 +6,9 @@
 
 A policy has a workload `subject`, a `resourcePattern`, one or more `actions`, and an `allow` or `deny` effect. Subjects are authenticated workload identities, not user-facing labels. Policies hold only metadata; secret values, version contents, tokens, and credentials never enter this model or its audit records.
 
-Supported actions are `secret.get`, `secret.list`, `secret.create`, `secret.addVersion`, `secret.disable`, `secret.enable`, `secret.destroy`, `alias.move`, `policy.set`, `rotate`, and `reconcile`. The `secret.read` action group expands to `secret.get` and `secret.list`.
+Supported actions are `secret.get`, `secret.list`, `secret.create`, `secret.addVersion`, `secret.disable`, `secret.enable`, `secret.destroy`, `alias.move`, `policy.set`, `rotate`, `rotate.revoke`, `rotate.rollback`, and `reconcile`. The `secret.read` action group expands to `secret.get` and `secret.list`.
+
+Rotation is decomposed into least-privilege actions so a rotate role need not hold `secret.destroy`: `rotate` starts a rotation, `alias.move` publishes the new version, `rotate.revoke` authorizes revoking the superseded provider credential (a provider-side delete), and `rotate.rollback` authorizes bounded rollback of a failed pre-publish rotation. `rotate.revoke`/`rotate.rollback` are distinct from `secret.destroy` (which governs destroying a control-plane version): granting `secret.destroy` alone confers no rotation capability, and a rotate role holding `rotate.revoke` can complete a rotation without `secret.destroy`.
 
 Precedence is fail closed:
 

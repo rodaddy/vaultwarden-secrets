@@ -346,8 +346,6 @@ const EXPECTED_TOOL_SCHEMAS: Record<string, unknown> = {
         consumers: { type: "array", items: { type: "string" } },
         credential: { type: "string" },
         idempotencyKey: { type: "string" },
-        oldPayloadRef: { type: "string" },
-        oldProviderRef: { type: "string" },
         strategy: { type: "string", enum: ["dual", "single"] },
       },
       required: ["connector", "credential", "idempotencyKey"],

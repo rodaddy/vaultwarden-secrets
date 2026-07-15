@@ -55,6 +55,8 @@ const ACTIONS: readonly Action[] = [
   "alias.move",
   "policy.set",
   "rotate",
+  "rotate.revoke",
+  "rotate.rollback",
   "reconcile",
 ];
 const POLICY_ACTIONS = new Set<PolicyAction>([...ACTIONS, "secret.read"]);

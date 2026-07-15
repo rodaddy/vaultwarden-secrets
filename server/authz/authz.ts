@@ -12,6 +12,8 @@ export type Action =
   | "alias.move"
   | "policy.set"
   | "rotate"
+  | "rotate.revoke"
+  | "rotate.rollback"
   | "reconcile";
 export type DecisionReason =
   | "matched"
@@ -51,6 +53,8 @@ const ACTIONS = new Set<Action>([
   "alias.move",
   "policy.set",
   "rotate",
+  "rotate.revoke",
+  "rotate.rollback",
   "reconcile",
 ]);
 const ACTION_GROUPS: Readonly<Record<"secret.read", readonly Action[]>> = {

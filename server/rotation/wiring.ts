@@ -31,6 +31,7 @@ import { AliasCasError } from "../control-plane/lifecycle";
 import type { AuthorizationEngine, Action } from "../authz/authz";
 import { bwCreateItem, bwGetItem, buildCreateTemplate } from "../vault-client";
 import { RotationEngine } from "./engine";
+import { RotationStore } from "./store-sqlite";
 import {
   CloudflareConnector,
   cloudflareConfigFromEnv,
@@ -197,15 +198,19 @@ export class OutboxAdapter implements Outbox {
 // Authorize adapter -- real AuthorizationEngine
 // ---------------------------------------------------------------------------
 
-/** Map rotation actions onto the authz Action union. */
+/**
+ * Map rotation actions onto the authz Action union. Each rotation capability is
+ * its OWN first-class action so a rotate role can be granted least-privilege
+ * (F2): revoking a provider credential (`rotate.revoke`) and bounded rollback
+ * (`rotate.rollback`) are distinct from `secret.destroy` on a version. A
+ * subject can drive rotation revoke/rollback WITHOUT holding secret.destroy,
+ * and holding secret.destroy alone grants no rotation capability.
+ */
 const ROTATION_TO_AUTHZ_ACTION: Record<AuthorizeInput["action"], Action> = {
   rotate: "rotate",
   "move-alias": "alias.move",
-  // Revoking the superseded credential is a destroy on the old version; rolling
-  // back a failed rotation likewise disables/destroys the freshly staged one.
-  // Both map to the existing secret.destroy authz action.
-  revoke: "secret.destroy",
-  rollback: "secret.destroy",
+  revoke: "rotate.revoke",
+  rollback: "rotate.rollback",
 };
 
 /**
@@ -386,4 +391,41 @@ export function resolveConnector(
     return new CloudflareConnector({ ...cfg, vaultReader });
   }
   return null;
+}
+
+export interface SupersededRefs {
+  /** Provider handle of the credential this rotation supersedes (revoke target). */
+  oldProviderRef: string | null;
+  /** Vault ref of the credential this rotation supersedes. */
+  oldPayloadRef: string | null;
+  /** True when there is no prior completed rotation -> nothing to revoke. */
+  firstIssuance: boolean;
+}
+
+/**
+ * SECURITY (F1): derive the superseded credential's revoke target from TRUSTED
+ * server state, never from the request. The prior COMPLETED rotation job for
+ * THIS secret recorded the provider handle + vault ref it published; those are
+ * exactly what the next rotation supersedes. A caller can therefore never point
+ * the revoke (a provider-side DELETE) at an unrelated credential id.
+ *
+ * If no prior completed job exists, this is a first issuance through the engine
+ * and there is nothing to revoke -- the caller MUST NOT be able to supply a
+ * handle to fill that gap.
+ */
+export function resolveSupersededRefs(
+  rotationDb: Database,
+  secret: string,
+): SupersededRefs {
+  const store = new RotationStore(rotationDb);
+  const last = store.getLastCompletedJob(secret);
+  if (!last || !last.newProviderRef) {
+    // No trusted prior credential for this secret -> first issuance.
+    return { oldProviderRef: null, oldPayloadRef: null, firstIssuance: true };
+  }
+  return {
+    oldProviderRef: last.newProviderRef,
+    oldPayloadRef: last.newPayloadRef ?? null,
+    firstIssuance: false,
+  };
 }

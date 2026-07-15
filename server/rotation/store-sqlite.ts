@@ -265,6 +265,25 @@ export class RotationStore {
     return r ? hydrate(r) : null;
   }
 
+  /**
+   * The most-recent COMPLETED ('done') rotation job for a secret, or null. Used
+   * to derive the superseded credential's TRUSTED provider handle / payload ref
+   * server-side (its new_provider_ref / new_payload_ref are the credential this
+   * next rotation supersedes) -- so a revoke target is never taken from a
+   * request parameter. Identifiers only; no material.
+   */
+  getLastCompletedJob(secret: string): JobRow | null {
+    const r = this.db
+      .query(
+        `SELECT * FROM rotation_jobs
+         WHERE secret = ? AND stage = 'done'
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1`,
+      )
+      .get(secret) as RawJob | null;
+    return r ? hydrate(r) : null;
+  }
+
   /** All jobs not in a terminal stage (for resumePending). */
   listPending(): JobRow[] {
     const rows = this.db

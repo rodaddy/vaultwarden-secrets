@@ -111,6 +111,43 @@ to diverge on `tools/list`; the candidate's own frozen baseline is
   reconciliation records) instead of an unsafe revert. A failed pre-publish
   rotation rolls back only the new credential, leaving the old one intact.
 
+## Known bound: terminal audit/outbox emission is best-effort (F3)
+
+The rotation-job durability (`rotation_jobs` / `rotation_checkpoints`) lives in
+a **separate SQLite database** from the control-plane audit ledger + outbox
+(`audit_ledger` / `outbox_events`). The wiring adapters
+(`AuditAdapter`/`OutboxAdapter` in `server/rotation/wiring.ts`) emit each
+stage's audit row and outbox event in their **own** control-plane transaction,
+which is distinct from the rotation-job checkpoint write the engine performs in
+the rotation DB. A single transaction cannot span the two databases, and the
+engine/`deps.ts` contract is intentionally not modified, so a cross-store
+atomic write is out of scope here.
+
+**Guarantee (at-least-once for pre-terminal stages).** For every stage up to
+and including `alias-moved` and `old-revoked`, the engine advances only after
+the stage's checkpoint is durable, and the audit + outbox rows for that stage
+are committed to the control-plane DB as it goes. A crash before `done`
+therefore leaves the job **non-terminal**, so `resumePending()` reclaims and
+re-drives it, and every prior stage's audit/outbox row is already durable.
+This is proven by
+`server/rotation/__tests__/wiring.test.ts` → "F3: every PRE-terminal stage's
+audit+outbox is durably committed".
+
+**Bound (best-effort terminal `done` event).** The final `old-revoked → done`
+transition commits the job/checkpoint first, then emits the
+`rotation.done`/`rotation.done.ok` audit + outbox rows. If the process dies in
+the window between those two commits, the job is already terminal (`done`) and
+is excluded from `resumePending()`, so the `rotation.done` audit row and
+`rotation.done.ok` outbox event can be **permanently absent**. This does NOT
+affect correctness of the rotation itself — the alias is published, the old
+credential revoked, and every *pre-terminal* lifecycle event (including
+`alias-moved` and `old-revoked`) is durable — only the terminal *notification*
+is best-effort. A durable-with-checkpoint or replay-based fix would require
+either an engine change (same-transaction emit) or a cross-store reconcile
+pass, both deferred; consumers that must observe completion should treat the
+presence of `rotation.old-revoked.ok` (durable) plus the job's terminal `done`
+stage as authoritative, not the `rotation.done.ok` event alone.
+
 ## REST enumeration parity (PR-D deferred item, closed here)
 
 The get / list / fields REST endpoints (`server/routes/secrets-read.ts`, wired
@@ -127,8 +164,30 @@ exist or which they may access. Byte-equivalence is proven in
 - `bun test server/__tests__/mcp-contract.test.ts` — frozen contract (now 11
   tools) green.
 - `bun test server/rotation/__tests__/wiring.test.ts` — adapter hazards (CAS,
-  audit/outbox tx, reconcile shape), authz mapping, vault checksum non-leak,
-  and a full end-to-end rotation to `done` against the real control-plane store.
+  audit/outbox tx, reconcile shape), least-privilege rotation authz
+  (`rotate.revoke`/`rotate.rollback` vs `secret.destroy`, F2), server-side
+  revoke-target derivation (F1), pre-terminal durability (F3), vault checksum
+  non-leak, and full end-to-end rotations against the real control-plane store.
 - `bun test server/__tests__/secrets-read-parity.test.ts` — REST byte-equivalence.
+- `bun test server/__tests__/folder-scope-legacy.test.ts` — legacy scoped token
+  fails closed to its folder (F4).
 - Cutover gates: `docs/compat/cutover-gates.md` (probe P2/P4/C3, shadow C1,
   rollback R1).
+
+## Security fixes from adversarial review
+
+- **F1 (P0):** `rotate_secret` no longer accepts `oldProviderRef`/`oldPayloadRef`
+  from the caller. The revoke target is derived server-side via
+  `resolveSupersededRefs` (the prior completed rotation job for THIS secret in
+  `rotation_jobs`), so a caller authorized to rotate secretA can never cause a
+  provider-side GET/DELETE against an unrelated credential id.
+- **F2 (P1):** rotation revoke/rollback are first-class authz actions
+  (`rotate.revoke`, `rotate.rollback`) rather than overloaded `secret.destroy`,
+  restoring least-privilege — a rotate role completes rotation without
+  `secret.destroy`, and `secret.destroy` alone grants no rotation capability.
+- **F3 (P1):** documented above as a known bound (pre-terminal at-least-once;
+  terminal `done` event best-effort) with a durability test — the atomic fix is
+  out of scope without changing the engine or spanning two databases.
+- **F4 (P0):** `FolderScope` normalizes `legacy:<client>` subjects to the scope
+  key `<client>`, so a legacy folder-scoped token fails closed to its folder
+  instead of being treated as unrestricted.
