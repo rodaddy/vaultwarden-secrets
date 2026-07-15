@@ -577,3 +577,74 @@ describe("read-tool response envelope", () => {
     expect(typeof result.content[0].text).toBe("string");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Vault-scope fail-closed (P1): folder scope is enforced only for the default
+// vault's snapshot. Scope-enforced read tools MUST reject a non-default `vault`
+// so a caller can't pass vault:"other" to bypass the default-vault scope check
+// and read out-of-scope material. Falsifiable: removing rejectNonDefaultVault
+// makes these return the tool's normal (non-error) envelope.
+// ---------------------------------------------------------------------------
+
+describe("vault-scope fail-closed", () => {
+  let sid: string;
+  beforeAll(async () => {
+    sid = await initSession();
+  });
+
+  async function callWithOtherVault(
+    name: string,
+    args: Record<string, unknown>,
+  ) {
+    const res = await rpc(
+      "tools/call",
+      { name, arguments: { ...args, vault: "other" } },
+      sid,
+      AUTH_HEADERS,
+      30,
+    );
+    expect(res.status).toBe(200);
+    return res.body.result;
+  }
+
+  test("get_credential rejects a non-default vault", async () => {
+    const result = await callWithOtherVault("get_credential", {
+      query: "anything",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("cross-vault");
+  });
+
+  test("get_secret rejects a non-default vault", async () => {
+    const result = await callWithOtherVault("get_secret", { name: "anything" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("cross-vault");
+  });
+
+  test("get_secret_fields rejects a non-default vault", async () => {
+    const result = await callWithOtherVault("get_secret_fields", {
+      name: "anything",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("cross-vault");
+  });
+
+  test("default vault is NOT rejected by the vault guard (guards over-blocking)", async () => {
+    // With feeling-lucky + no snapshot, get_credential resolves to a normal
+    // not-found — NOT the cross-vault error. Proves the guard only blocks
+    // non-default vaults.
+    const res = await rpc(
+      "tools/call",
+      {
+        name: "get_credential",
+        arguments: { query: "zzzzz", vault: "default" },
+      },
+      sid,
+      AUTH_HEADERS,
+      31,
+    );
+    expect(res.status).toBe(200);
+    const text = res.body.result.content[0].text as string;
+    expect(text).not.toContain("cross-vault");
+  });
+});

@@ -24,13 +24,19 @@ import { getActiveVault } from "../../index";
  *
  * Shared by BOTH FolderScope (folder allow-list) and the field-deny map so
  * there is exactly one normalization for all env-keyed access decisions.
+ *
+ * SECURITY (F4 P2): lowercase FIRST, then strip the (lowercased) `legacy:`
+ * prefix — repeatedly. Opaque workload-token subjects can be arbitrary case, so
+ * a mixed-case `Legacy:PAYROLL` must still normalize to `payroll`. Stripping
+ * before lowercasing would leave `legacy:payroll` (prefix not stripped) and the
+ * deny/scope lookup would fail OPEN.
  */
 export function scopeKey(clientId: string): string {
-  let stripped = clientId;
+  let stripped = clientId.toLowerCase();
   while (stripped.startsWith("legacy:")) {
     stripped = stripped.slice("legacy:".length);
   }
-  return stripped.toLowerCase();
+  return stripped;
 }
 
 export class FolderScope {
@@ -259,11 +265,55 @@ export function loadFolderScopes(): Map<string, string[]> {
 }
 
 // ============================================================================
-// Field-level deny (per-client)
+// Field-level deny (per-client) — THE single enforcement point
 // ============================================================================
+//
+// SECURITY: every MCP read path that can return a field's VALUE (get_secret,
+// get_secret_fields, get_credential, get_service) MUST route its field/value
+// decisions through the helpers here. A new field/value-returning tool that
+// forgets to call these leaks denied material. Do NOT re-implement deny logic
+// inline anywhere else.
+//
+// Deny keys are matched against the REAL FLAT field-name shape produced by
+// index.ts `buildFieldsObject`: `username`, `password`, `uri`, `totp`, `notes`,
+// and custom-field names (verbatim). Matching is case-INSENSITIVE exact on the
+// flat key. Path-style aliases the caller may use (e.g. `login.password`,
+// `fields.API_KEY`, a bare `password` suffix) are CANONICALIZED to that flat
+// key BEFORE the deny check, so a rule `API_DENY_FIELDS_X=password` covers
+// `get_secret item.login.password` AND `get_secret item.password` AND the
+// `password` key in a fields object. We deliberately do NOT invent a `login.`
+// namespace: the data never has one.
 
-/** scopeKey(clientId) → Set of denied field names */
+/** scopeKey(clientId) → Set of denied real flat field names (lowercased). */
 const clientDeniedFields = new Map<string, Set<string>>();
+
+/**
+ * Canonicalize any field reference (a flat key, a path-style field like
+ * `login.password`, a `fields.<CUSTOM>` ref, or a bare `.password` suffix) to
+ * the REAL flat key name that `buildFieldsObject` emits, lowercased for
+ * case-insensitive comparison.
+ *
+ * Mappings (mirrors index.ts parseSecretPath / buildFieldsObject):
+ *   login.password → password   login.username → username
+ *   login.totp     → totp        login.uri      → uri   uri → uri
+ *   notes → notes                fields.X / X    → x (custom field verbatim)
+ */
+export function canonicalizeFieldName(name: string): string {
+  const lower = name.toLowerCase();
+  // `something.fields.CUSTOM` or `fields.CUSTOM` → custom field name.
+  const fieldsMatch = lower.match(/(?:^|\.)fields\.(.+)$/);
+  if (fieldsMatch) return fieldsMatch[1]!;
+  // `login.<sub>` → the flat login-derived key.
+  const loginMatch = lower.match(
+    /(?:^|\.)login\.(password|username|totp|uri)$/,
+  );
+  if (loginMatch) return loginMatch[1]!;
+  // Bare known login/notes suffix at the end of a path → flat key.
+  const bare = lower.match(/(?:^|\.)(password|username|uri|totp|notes)$/);
+  if (bare) return bare[1]!;
+  // Otherwise it is already a flat key (or a custom field name) — verbatim.
+  return lower;
+}
 
 /**
  * Load per-client denied fields from environment variables.
@@ -271,9 +321,9 @@ const clientDeniedFields = new Map<string, Set<string>>();
  *
  * SECURITY (F4): the map is keyed by {@link scopeKey}, the SAME normalization
  * FolderScope uses, so an env rule API_DENY_FIELDS_PAYROLL is stored under
- * `payroll` and later matched for a `legacy:payroll` subject. Keying by the raw
- * client name (the old WIP behavior) would miss legacy subjects and fail OPEN —
- * the denied field would silently leak.
+ * `payroll` and matched for a `legacy:payroll` subject. Rule field names are
+ * canonicalized to real flat keys so an operator can write either
+ * `password` or `login.password` and it enforces on the real `password` key.
  */
 export function loadDenyFields(): void {
   clientDeniedFields.clear();
@@ -285,7 +335,8 @@ export function loadDenyFields(): void {
         value
           .split(",")
           .map((f) => f.trim())
-          .filter(Boolean),
+          .filter(Boolean)
+          .map(canonicalizeFieldName),
       );
       if (fields.size > 0) {
         clientDeniedFields.set(clientId, fields);
@@ -295,13 +346,31 @@ export function loadDenyFields(): void {
   }
 }
 
+/** Whether the subject has ANY deny rule (fast pre-check). */
+export function hasDenyRules(clientId: string): boolean {
+  const denied = clientDeniedFields.get(scopeKey(clientId));
+  return !!denied && denied.size > 0;
+}
+
 /**
- * Strip denied fields from a result object for a given client. Returns a new
- * object with denied fields removed. No-op if the client has no deny rules.
+ * Is a single field reference denied for this subject? Canonicalizes the
+ * reference to its real flat key first, so `login.password`, `item.password`,
+ * and `password` all resolve to the `password` rule. Fail-closed callers use
+ * this BEFORE reading material.
+ */
+export function isFieldDenied(clientId: string, fieldRef: string): boolean {
+  const denied = clientDeniedFields.get(scopeKey(clientId));
+  if (!denied || denied.size === 0) return false;
+  return denied.has(canonicalizeFieldName(fieldRef));
+}
+
+/**
+ * Strip denied fields from a flat fields object (the shape from
+ * `getSecretObject` / `buildFieldsObject`). Keys are compared case-insensitively
+ * against the canonicalized deny set. Returns a new object; no-op if no rules.
  *
- * SECURITY (F4): the lookup normalizes `clientId` via {@link scopeKey} so a
- * `legacy:<client>` subject matches the rule stored for `<client>`. Reverting
- * this to a raw lookup makes the deny fail OPEN for legacy subjects.
+ * SECURITY (F4): normalizes `clientId` via {@link scopeKey} so a
+ * `legacy:<client>` subject matches the rule stored for `<client>`.
  */
 export function filterDeniedFields<T extends Record<string, unknown>>(
   clientId: string,
@@ -311,9 +380,9 @@ export function filterDeniedFields<T extends Record<string, unknown>>(
   if (!denied || denied.size === 0) return obj;
 
   const filtered = { ...obj };
-  for (const field of denied) {
-    if (field in filtered) {
-      delete filtered[field];
+  for (const objKey of Object.keys(filtered)) {
+    if (denied.has(canonicalizeFieldName(objKey))) {
+      delete filtered[objKey];
     }
   }
   return filtered;

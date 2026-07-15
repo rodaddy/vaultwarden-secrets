@@ -56,9 +56,33 @@ export interface CredentialResolverDeps {
   /** Read a secret value by name/path. */
   getSecret: (path: string) => Promise<string>;
   /** Read the full field object for an item name. */
-  getSecretObject: (name: string) => Promise<Record<string, unknown>>;
-  /** Strip denied fields for the subject; also used to test a single field. */
+  getSecretObject: (name: string) => Promise<Record<string, string>>;
+  /** Strip denied fields from a flat fields object for the subject. */
   filterDenied: <T extends Record<string, unknown>>(obj: T) => T;
+  /**
+   * Whether a single field reference is denied for the subject. Must
+   * canonicalize path-style refs (login.password, fields.X, bare password) to
+   * the real flat key before deciding — same rule as filterDenied.
+   */
+  isDenied: (fieldRef: string) => boolean;
+}
+
+/**
+ * Which REAL flat key the item's primary value (getSecret(name) smart-fallback)
+ * resolves to, given the item's fields object. Mirrors index.ts
+ * extractFieldFromItem's default branch: password → notes → first custom field.
+ * Returns null if no primary value exists. Used to withhold the primary value
+ * when its underlying field is denied (fail closed).
+ */
+export function primaryValueKey(fields: Record<string, string>): string | null {
+  if ("password" in fields) return "password";
+  if ("notes" in fields) return "notes";
+  // First custom field = first key that is not a built-in login/notes key.
+  const builtins = new Set(["username", "password", "uri", "totp", "notes"]);
+  for (const k of Object.keys(fields)) {
+    if (!builtins.has(k)) return k;
+  }
+  return null;
 }
 
 export type CredentialResult =
@@ -66,10 +90,20 @@ export type CredentialResult =
   | { ok: false; error: string };
 
 /**
+ * Generic not-found message reused for BOTH "no match" and "match not in
+ * allowed scope" so the not-in-scope outcome is INDISTINGUISHABLE from
+ * not-found — a caller cannot use it to confirm the existence of an
+ * out-of-scope item (enumeration parity).
+ */
+const NOT_FOUND = (query: string) =>
+  `No credentials found matching "${query}". Try a different search term or use list_secrets to browse.`;
+
+/**
  * Resolve a credential: exact match first, else best fuzzy candidate. If a
- * specific `field` is requested it is deny-checked (fail-closed) then read;
- * otherwise all fields are returned with denied fields stripped plus a
- * best-effort primary value. Never returns secret material in an error.
+ * specific `field` is requested it is deny-checked (fail-closed) BEFORE any
+ * read; otherwise all fields are returned with denied fields stripped plus a
+ * primary value that is WITHHELD when its underlying field is denied. Never
+ * returns secret material in an error.
  */
 export async function resolveCredential(
   query: string,
@@ -83,17 +117,13 @@ export async function resolveCredential(
   if (!name) {
     const ranked = rankCandidates(await deps.listScoped(), query);
     if (ranked.length === 0) {
-      return {
-        ok: false,
-        error: `No credentials found matching "${query}". Try a different search term or use list_secrets to browse.`,
-      };
+      return { ok: false, error: NOT_FOUND(query) };
     }
     name = await deps.findScoped(ranked[0]!);
     if (!name) {
-      return {
-        ok: false,
-        error: `Found "${ranked[0]}" but it is not in allowed folder scope.`,
-      };
+      // Best candidate is out of scope. Return the SAME generic message as
+      // no-match so existence of the out-of-scope item is not confirmable.
+      return { ok: false, error: NOT_FOUND(query) };
     }
   }
 
@@ -103,9 +133,8 @@ export async function resolveCredential(
   };
 
   if (field) {
-    // Deny check before touching material (fail closed).
-    const probe = deps.filterDenied({ [field]: true });
-    if (!(field in probe)) {
+    // Deny check BEFORE touching material (fail closed).
+    if (deps.isDenied(field)) {
       return {
         ok: false,
         error: `Access denied: field "${field}" is restricted for this client.`,
@@ -114,12 +143,18 @@ export async function resolveCredential(
     result.field = field;
     result.value = await deps.getSecret(`${name}.${field}`);
   } else {
-    result.fields = deps.filterDenied(await deps.getSecretObject(name));
-    // Best-effort primary value; absence is not an error.
-    try {
-      result.value = await deps.getSecret(name);
-    } catch {
-      /* no primary value available */
+    const rawFields = await deps.getSecretObject(name);
+    result.fields = deps.filterDenied(rawFields);
+    // Primary value maps to a real field (password → notes → first custom
+    // field). Withhold it if that underlying field is denied — otherwise
+    // `value` would leak a field the `fields` object correctly stripped.
+    const primaryKey = primaryValueKey(rawFields);
+    if (primaryKey && !deps.isDenied(primaryKey)) {
+      try {
+        result.value = await deps.getSecret(name);
+      } catch {
+        /* no primary value available */
+      }
     }
   }
 
