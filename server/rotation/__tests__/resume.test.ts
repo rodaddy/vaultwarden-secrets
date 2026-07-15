@@ -17,10 +17,10 @@ import type {
   EngineDeps,
   ConsumerAllowlist,
   Connector,
-  ConnectorContext,
-  ConnectorCreateResult,
+  VaultWriteResult,
 } from "../deps";
 import { TestConnector } from "../connectors/test-connector";
+import { CloudflareConnector } from "../connectors/cloudflare";
 import {
   InMemoryVaultWriter,
   InMemoryControlPlaneStore,
@@ -95,100 +95,156 @@ afterEach(() => {
 });
 
 /**
- * Minimal in-memory model of a provider (like Cloudflare) whose tokens are
- * keyed by a deterministic job-scoped NAME. It reproduces the real failure the
- * previous test missed: a crash AFTER the provider mints but BEFORE the engine
- * records the handle leaves an ORPHAN. A resume that blindly re-mints would
- * double-create; the crash-safe connector must detect+clean the orphan so
- * exactly one live token remains.
+ * Fetch-backed model of the REAL Cloudflare token API, so the crash-safe test
+ * drives the ACTUAL CloudflareConnector.create() code (LIST -> delete-orphan ->
+ * mint) on resume, not any test-owned cleanup. Tokens are keyed by their name.
  */
-class FakeProvider {
+class CfProviderApi {
   private seq = 0;
-  readonly live = new Map<string, { name: string }>(); // id -> token
-  mintByName(name: string): { id: string; value: string } {
-    const id = `tok-${++this.seq}`;
-    this.live.set(id, { name });
-    return { id, value: `SECRET-${id}-plaintext-abcdef0123456789` };
-  }
-  deleteOrphansByName(name: string): void {
-    for (const [id, t] of [...this.live])
-      if (t.name === name) this.live.delete(id);
-  }
+  readonly tokens = new Map<string, { name: string; status: string }>();
   countByName(name: string): number {
-    return [...this.live.values()].filter((t) => t.name === name).length;
+    return [...this.tokens.values()].filter((t) => t.name === name).length;
+  }
+  /** A fetch impl matching cloudflare.ts's calls against this in-memory state. */
+  fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    const env = (result: unknown) => ({
+      ok: true,
+      json: async () => ({ result, success: true, errors: [], messages: [] }),
+    });
+    // LIST tokens (orphan scan)
+    if (u.endsWith("/user/tokens") && method === "GET") {
+      return env(
+        [...this.tokens].map(([id, t]) => ({
+          id,
+          name: t.name,
+          status: t.status,
+        })),
+      ) as unknown as Response;
+    }
+    // MINT token
+    if (u.endsWith("/user/tokens") && method === "POST") {
+      const body = JSON.parse(String(init!.body)) as { name: string };
+      const id = `tok-${++this.seq}`;
+      this.tokens.set(id, { name: body.name, status: "active" });
+      return env({
+        id,
+        name: body.name,
+        status: "active",
+        value: `SECRET-${id}-plaintext-abcdef0123456789`,
+      }) as unknown as Response;
+    }
+    // DELETE token (orphan cleanup / revoke / rollback)
+    const del = u.match(/\/user\/tokens\/([^/]+)$/);
+    if (del && method === "DELETE") {
+      this.tokens.delete(del[1]!);
+      return env({ id: del[1] }) as unknown as Response;
+    }
+    // verify probe (GET /user/tokens/verify as the new bearer)
+    if (u.endsWith("/user/tokens/verify") && method === "GET") {
+      return env({ id: "probe", status: "active" }) as unknown as Response;
+    }
+    throw new Error(`unexpected cf call ${method} ${u}`);
+  }) as unknown as typeof fetch;
+}
+
+/** A VaultWriter that stores material, then throws -- models a process crash
+ * AFTER the provider mint + vault write but BEFORE the engine's handle
+ * checkpoint. */
+class CrashAfterStoreVault extends InMemoryVaultWriter {
+  async writeItem(
+    ref: string,
+    gen: () => string | Promise<string>,
+  ): Promise<VaultWriteResult> {
+    await super.writeItem(ref, gen); // material + provider mint persisted
+    throw new Error(
+      "SIMULATED CRASH after vault write, before handle checkpoint",
+    );
   }
 }
 
-/** Connector over FakeProvider that models the crash-safe create contract. */
-function providerConnector(
-  provider: FakeProvider,
-  opts: { crashAfterMint?: boolean } = {},
-): Connector {
-  return {
-    async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
-      const name = `rotation-${ctx.secret}-${ctx.jobId}`;
-      // Crash-safe: clean any orphan from a prior crashed attempt, then mint one.
-      provider.deleteOrphansByName(name);
-      const tok = provider.mintByName(name);
-      const w = await ctx.vault.writeItem(`${name}#${tok.id}`, () => tok.value);
-      if (opts.crashAfterMint) {
-        // Simulate a process crash AFTER the mint + vault write but BEFORE the
-        // engine can persist the provider handle / checkpoint.
-        throw new Error("SIMULATED CRASH after mint, before checkpoint");
-      }
-      return {
-        payloadRef: w.payloadRef,
-        checksum: w.checksum,
-        providerRef: tok.id,
-      };
-    },
-    async verify() {
-      return true;
-    },
-    async revoke() {},
-    async rollback() {},
-  };
-}
-
-describe("crash-resume (two connections, one file db)", () => {
-  test("TRUE crash after provider mint (before checkpoint) -> resume leaves exactly one live token", async () => {
+describe("crash-resume (real CloudflareConnector, two connections, one file db)", () => {
+  test("TRUE crash after Cloudflare mint (before handle checkpoint) -> real resume adopts/cleans, exactly ONE token", async () => {
     const path = tmpDbPath();
-    const shared = newShared();
-    const provider = new FakeProvider();
-    const name = "rotation-svc-token-job-1";
+    const provider = new CfProviderApi();
+    const name = "rotation-cf-dns-job-cf1";
 
-    // Executor 1: seeds the job, then a single step MINTS at the provider but
-    // "crashes" (throws) before the engine records the provider handle. The
-    // step's error handling leaves the job at 'requested' with NO provider ref
-    // -- exactly the pre-checkpoint crash window. Then the connection dies.
+    // Executor 1 uses the REAL CloudflareConnector. Its create() mints a token
+    // at the provider (orphan) and writes to the vault, but the vault write
+    // throws -> the engine never reaches the handle checkpoint. Job stays at
+    // 'requested' with no provider ref. Exactly the pre-checkpoint crash.
+    const crashVault = new CrashAfterStoreVault();
+    const cp1 = new InMemoryControlPlaneStore();
+    const conn1 = new CloudflareConnector({
+      apiToken: "mgmt",
+      fetchImpl: provider.fetch,
+      vaultReader: crashVault,
+    });
     const db1 = new Database(path);
     const e1 = new RotationEngine(db1, {
-      ...depsFor(shared, providerConnector(provider, { crashAfterMint: true })),
+      store: cp1,
+      authorize: allowAllAuthorize(),
+      audit: new InMemoryAudit(),
+      outbox: new InMemoryOutbox(),
+      connector: conn1,
+      vault: crashVault,
+      consumerAllowlist: { caddy: { kind: "systemd", unit: "caddy.service" } },
+      consumerReloader: new RecordingConsumerReloader(),
       leaseTtlMs: 60_000,
+      // default maxAttempts: a single step() records one crashed attempt and
+      // leaves the job resumable at 'requested' (no provider handle recorded).
     });
-    await e1.startJob(req({ jobId: "job-1" }));
-    await e1.step("job-1"); // mints at provider, throws before persisting handle
+    await e1.startJob({
+      credential: "cf-dns",
+      connector: "cloudflare",
+      strategy: "dual",
+      consumers: ["caddy"],
+      idempotencyKey: "cf-key",
+      subject: "op",
+      jobId: "job-cf1",
+    });
+    await e1.step("job-cf1"); // real CF mint + vault write that throws
 
-    // The engine never recorded a provider handle (crash was pre-checkpoint)...
-    const stalled = e1.getReceipt("job-1");
-    expect(stalled.stage).toBe("requested");
+    const stalled = e1.getReceipt("job-cf1");
+    expect(stalled.stage).toBe("requested"); // never recorded a handle
+    // No provider handle / refs were persisted (crash before the checkpoint).
     expect(stalled.newPayloadRef).toBeNull();
-    // ...yet the provider has exactly one orphan token from the mint.
+    expect(stalled.newChecksum).toBeNull();
+    // The provider now holds exactly one ORPHAN token from the crashed mint.
     expect(provider.countByName(name)).toBe(1);
-    db1.close(); // process is gone
+    db1.close(); // process gone
 
-    // Executor 2: fresh connection + fresh executor id, crash-safe connector.
+    // Executor 2: fresh connection, SAME control plane + provider, a REAL
+    // CloudflareConnector with a working vault. resumePending() drives the REAL
+    // connector.create() whose LIST->delete-orphan->mint runs in PRODUCTION
+    // code -- no test-owned cleanup.
+    const goodVault = new InMemoryVaultWriter();
+    const conn2 = new CloudflareConnector({
+      apiToken: "mgmt",
+      fetchImpl: provider.fetch,
+      vaultReader: goodVault,
+    });
     const db2 = new Database(path);
     const e2 = new RotationEngine(db2, {
-      ...depsFor(shared, providerConnector(provider)),
+      store: cp1, // same control plane survives the crash
+      authorize: allowAllAuthorize(),
+      audit: new InMemoryAudit(),
+      outbox: new InMemoryOutbox(),
+      connector: conn2,
+      vault: goodVault,
+      consumerAllowlist: { caddy: { kind: "systemd", unit: "caddy.service" } },
+      consumerReloader: new RecordingConsumerReloader(),
       leaseTtlMs: 60_000,
     });
     const resumed = await e2.resumePending();
     expect(resumed.length).toBe(1);
     expect(resumed[0]!.stage).toBe("done");
 
-    // THE ASSERTION THE OLD TEST MISSED: after resume, exactly ONE live token
-    // for this job -- the orphan was cleaned, not double-created.
+    // THE ASSERTION THE OLD TEST MISSED, now against PRODUCTION behavior: after
+    // the real resume, exactly ONE live token for this job -- the orphan minted
+    // by the crashed attempt was detected + deleted by CloudflareConnector,
+    // then one fresh token minted. Not two.
     expect(provider.countByName(name)).toBe(1);
 
     db2.close();

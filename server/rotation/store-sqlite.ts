@@ -57,6 +57,40 @@ export function applyRotationMigration(db: Database): void {
   db.run(sql);
 }
 
+/** True if `err` is a SQLite BUSY / "database is locked" contention signal. */
+function isBusy(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string })?.code ?? "";
+  return (
+    /database is locked/i.test(msg) ||
+    /database table is locked/i.test(msg) ||
+    code === "SQLITE_BUSY" ||
+    code === "SQLITE_BUSY_SNAPSHOT" ||
+    code === "SQLITE_LOCKED"
+  );
+}
+
+/**
+ * Bounded synchronous backoff for BUSY retries. Uses Atomics.wait on a
+ * throwaway buffer so it blocks this thread briefly WITHOUT an event-loop turn
+ * (acquireLease is synchronous). Backoff grows with the attempt, with a little
+ * jitter so two contending processes don't lock-step.
+ */
+function busySleep(attempt: number): void {
+  const base = Math.min(2 + attempt * 3, 25); // ms, capped
+  const jitter = Math.floor(Math.random() * 4);
+  const ms = base + jitter;
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // SharedArrayBuffer unavailable: fall back to a tight spin for `ms`.
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      /* spin */
+    }
+  }
+}
+
 /** Thrown when a fenced-off (stale) executor tries to mutate a job. */
 export class FencedOutError extends Error {
   constructor(secret: string, expected: number, actual: number) {
@@ -368,11 +402,25 @@ export class RotationStore {
   // -- leases (atomic, fenced) --------------------------------------------
 
   /**
-   * Atomically acquire the lease for `secret` owned by `owner` (a
-   * per-execution uuid). Succeeds only if no OTHER owner holds a live lease.
-   * Mints a fresh monotonic fencing token. Returns a LeaseHandle on success or
-   * null if another live owner holds it. Single conditional write -- no
-   * SELECT-then-UPSERT window.
+   * Atomically acquire the lease for `secret` owned by `owner` (a per-execution
+   * uuid). ONE conditional statement -- no SELECT-then-decide window:
+   *
+   *   INSERT ... ON CONFLICT(secret) DO UPDATE SET
+   *     owner = excluded.owner,
+   *     fence = rotation_leases.fence + 1,   -- only on a real ownership change
+   *     expires_at = excluded.expires_at
+   *   WHERE rotation_leases.expires_at <= excluded.acquired_at
+   *      OR rotation_leases.owner = excluded.owner
+   *   RETURNING owner, fence;
+   *
+   * Acquisition SUCCEEDED iff the RETURNING row's owner == my executorId.
+   * The ON CONFLICT guard guarantees at most one owner even if two writers
+   * interleave. SQLITE_BUSY / "database is locked" is treated as a LOSS of the
+   * attempt (a normal outcome), retried with bounded backoff, and NEVER thrown
+   * out of the engine.
+   *
+   * Fresh insert (no prior row) mints fence from the monotonic sequence so
+   * fences stay globally monotonic across secrets and takeovers.
    */
   acquireLease(
     secret: string,
@@ -381,54 +429,75 @@ export class RotationStore {
     ttlMs: number,
   ): LeaseHandle | null {
     const expires = now + ttlMs;
-    // BEGIN IMMEDIATE: take a RESERVED lock at statement 1 so two connections
-    // to the same file db serialize here -- one runs the whole body, the other
-    // waits (busy_timeout) and then sees the committed lease. No two writers
-    // interleave inside this critical section.
+    // Bounded retry: on BUSY (two file connections contending) back off and
+    // retry a few times, then report "not acquired" -- never throw.
+    const MAX_TRIES = 12;
+    for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+      try {
+        return this.acquireOnce(secret, owner, now, expires);
+      } catch (err) {
+        if (isBusy(err) && attempt < MAX_TRIES - 1) {
+          busySleep(attempt);
+          continue;
+        }
+        if (isBusy(err)) return null; // exhausted: a normal loss, not an error
+        throw err; // a genuine (non-busy) error
+      }
+    }
+    return null;
+  }
+
+  /** Single-statement conditional acquire under BEGIN IMMEDIATE. */
+  private acquireOnce(
+    secret: string,
+    owner: string,
+    now: number,
+    expires: number,
+  ): LeaseHandle | null {
     const txn = this.db.transaction((): LeaseHandle | null => {
-      // Mint the next fencing token (monotonic).
+      // Fresh-insert fence comes from the monotonic sequence; a takeover on
+      // conflict increments the row's own fence by 1 (only when ownership
+      // actually changes -- a same-owner renew keeps the fence unchanged, see
+      // the CASE below).
       this.db
         .query("UPDATE rotation_fence_seq SET value = value + 1 WHERE id = 0")
         .run();
-      const fence = (
+      const seqFence = (
         this.db
           .query("SELECT value FROM rotation_fence_seq WHERE id = 0")
           .get() as { value: number }
       ).value;
 
-      // Single conditional claim: succeeds only if an existing row is expired
-      // or already ours. `changes` tells us if we won without any read-then-
-      // decide window.
-      const upd = this.db
+      const row = this.db
         .query(
-          `UPDATE rotation_leases
-             SET owner = ?, fence = ?, expires_at = ?, acquired_at = ?
-           WHERE secret = ?
-             AND (expires_at <= ? OR owner = ?)`,
+          `INSERT INTO rotation_leases (secret, owner, fence, expires_at, acquired_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(secret) DO UPDATE SET
+             owner = excluded.owner,
+             fence = CASE
+               WHEN rotation_leases.owner = excluded.owner THEN rotation_leases.fence
+               ELSE rotation_leases.fence + 1
+             END,
+             expires_at = excluded.expires_at,
+             acquired_at = excluded.acquired_at
+           WHERE rotation_leases.expires_at <= excluded.acquired_at
+              OR rotation_leases.owner = excluded.owner
+           RETURNING owner, fence, expires_at`,
         )
-        .run(owner, fence, expires, now, secret, now, owner);
+        .get(secret, owner, seqFence, expires, now) as {
+        owner: string;
+        fence: number;
+        expires_at: number;
+      } | null;
 
-      if (upd.changes === 1) {
-        return { secret, owner, fence, expiresAt: expires };
-      }
-
-      // No row updated: either no lease row exists yet, or a live foreign lease
-      // holds it. Try to INSERT -- the PRIMARY KEY on `secret` rejects the race
-      // if a row already exists (live foreign lease -> constraint -> caught).
-      try {
-        this.db
-          .query(
-            `INSERT INTO rotation_leases (secret, owner, fence, expires_at, acquired_at)
-             VALUES (?, ?, ?, ?, ?)`,
-          )
-          .run(secret, owner, fence, expires, now);
-        return { secret, owner, fence, expiresAt: expires };
-      } catch {
-        // Row already exists and is a live foreign lease: we do not hold it.
-        return null;
-      }
+      // No RETURNING row => the ON CONFLICT WHERE guard rejected us: a live
+      // foreign lease holds the secret. We did not acquire.
+      if (!row) return null;
+      // RETURNING row whose owner is not us can only happen on a lost race that
+      // committed another owner first; treat as not acquired.
+      if (row.owner !== owner) return null;
+      return { secret, owner, fence: row.fence, expiresAt: row.expires_at };
     });
-    // .immediate() forces BEGIN IMMEDIATE for cross-connection serialization.
     return txn.immediate();
   }
 

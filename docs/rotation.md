@@ -28,16 +28,21 @@ safely and leaves a recoverable state.
   credential (never the management credential); inability to probe returns
   `false` and fails closed. `revoke()` runs only after `verify()` passes AND the
   alias has moved. First issuance (no prior credential) skips revoke entirely.
-- **Serialized per credential (fenced lease).** The lease is acquired inside a
-  `BEGIN IMMEDIATE` transaction (RESERVED lock at statement 1, so two
-  connections to the same file db serialize here) via a SINGLE conditional claim
-  (`UPDATE ... WHERE expires_at <= ? OR owner = ?`, checked by `changes`, with an
-  `INSERT` fallback the PRIMARY KEY rejects on a race) -- no read-then-decide
-  window. Owned by a PER-EXECUTION uuid (not the job id, so two resume runs can't
-  collude as one owner); carries a monotonic fencing token. Revalidated/renewed
-  around every awaited effect; every persisted write is fenced, so an executor
-  that lost the lease aborts before mutating. Duplicate `idempotencyKey` returns
-  the existing job.
+- **Serialized per credential (fenced lease).** Acquire is ONE statement under
+  `BEGIN IMMEDIATE`:
+  `INSERT ... ON CONFLICT(secret) DO UPDATE SET owner=excluded.owner,
+  fence=CASE WHEN owner unchanged THEN fence ELSE fence+1 END,
+  expires_at=excluded.expires_at WHERE expires_at <= excluded.acquired_at OR
+  owner = excluded.owner RETURNING owner, fence`. Acquisition SUCCEEDED iff the
+  RETURNING row's owner is mine -- no SELECT-then-decide window; the ON CONFLICT
+  guard guarantees at most one owner even if two writers interleave. Fence
+  increments only on a real ownership change. `SQLITE_BUSY` / "database is
+  locked" is treated as a LOSS (a normal outcome), retried with bounded
+  synchronous backoff, and NEVER thrown out of the engine. Owner is a
+  PER-EXECUTION uuid (not the job id, so two resume runs can't collude as one
+  owner). Revalidated/renewed around every awaited effect; every persisted write
+  is fenced, so an executor that lost the lease aborts before mutating.
+  Duplicate `idempotencyKey` returns the existing job.
 - **Crash-safe creation.** A durable creation-intent is set BEFORE the
   connector/vault create call, and the provider handle + refs are persisted in a
   dedicated fenced write immediately after the mint (before the stage

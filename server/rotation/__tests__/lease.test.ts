@@ -98,7 +98,7 @@ describe("atomic fenced lease", () => {
   });
 });
 
-describe("atomic lease across TWO connections to one file db", () => {
+describe("genuine multi-PROCESS lease race (two subprocesses, one file db)", () => {
   let dir: string | null = null;
   afterEach(() => {
     if (dir) {
@@ -107,47 +107,90 @@ describe("atomic lease across TWO connections to one file db", () => {
     }
   });
 
-  test("two independent connections racing for the same credential: exactly one wins", async () => {
-    dir = mkdtempSync(join(tmpdir(), "vw-lease-"));
+  test("two OS processes hammer acquire for the same secret; exactly one wins per round, no BUSY thrown", async () => {
+    dir = mkdtempSync(join(tmpdir(), "vw-lease-mp-"));
     const path = join(dir, "lease.sqlite");
-    // Two RotationStore instances over two independent connections (two
-    // "processes"). Both try to acquire the SAME credential at the SAME logical
-    // time in many concurrent attempts; the atomic BEGIN IMMEDIATE + single
-    // conditional claim must let exactly one win each round.
-    const dbA = new Database(path);
-    const dbB = new Database(path);
-    const sA = new RotationStore(dbA);
-    const sB = new RotationStore(dbB, false); // migration already applied by A
-
+    const worker = join(import.meta.dir, "lease-race-worker.ts");
     const ROUNDS = 40;
-    let bothWon = 0;
-    let neitherWon = 0;
-    for (let i = 0; i < ROUNDS; i++) {
-      const now = 1_000_000 + i * 1000;
-      // Fire both acquires "concurrently" (Promise.all over sync calls with the
-      // busy_timeout serializing the writers between the two connections).
-      const [a, b] = await Promise.all([
-        Promise.resolve().then(() =>
-          sA.acquireLease("shared-cred", `A-${i}`, now, 100),
-        ),
-        Promise.resolve().then(() =>
-          sB.acquireLease("shared-cred", `B-${i}`, now, 100),
-        ),
-      ]);
-      const winners = [a, b].filter((x) => x !== null);
-      // INVARIANT: never two simultaneous live owners of the same credential.
-      if (winners.length === 2) bothWon++;
-      if (winners.length === 0) neitherWon++;
-      // Exactly one winner each round (the prior round's lease has expired by
-      // `now` since ttl=100 << 1000ms step).
-      expect(winners.length).toBe(1);
-      // Fences are globally monotonic across both connections.
-      expect(winners[0]!.fence).toBeGreaterThan(0);
-    }
-    expect(bothWon).toBe(0);
-    expect(neitherWon).toBe(0);
+    const SECRET = "shared-cred";
 
-    dbA.close();
-    dbB.close();
-  });
+    // Parent creates the schema once (so both workers see it), then spawns two
+    // real subprocesses that each open their OWN connection and contend.
+    const setup = new Database(path);
+    new RotationStore(setup); // applies migration + pragmas
+    setup.close();
+
+    const spawnWorker = (id: number) =>
+      Bun.spawn(["bun", worker, path, String(id), SECRET, String(ROUNDS)], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+    const p0 = spawnWorker(0);
+    const p1 = spawnWorker(1);
+    const [out0, out1, err0, err1] = await Promise.all([
+      new Response(p0.stdout).text(),
+      new Response(p1.stdout).text(),
+      new Response(p0.stderr).text(),
+      new Response(p1.stderr).text(),
+    ]);
+    await Promise.all([p0.exited, p1.exited]);
+
+    // Neither subprocess may have crashed.
+    expect(err0.trim()).toBe("");
+    expect(err1.trim()).toBe("");
+    expect(p0.exitCode).toBe(0);
+    expect(p1.exitCode).toBe(0);
+
+    type Line = {
+      round: number;
+      result: "acquired" | "notacquired" | "busyerror";
+      fence?: number;
+      error?: string;
+    };
+    const parse = (s: string): Line[] =>
+      s
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Line);
+    const r0 = parse(out0);
+    const r1 = parse(out1);
+    expect(r0.length).toBe(ROUNDS);
+    expect(r1.length).toBe(ROUNDS);
+
+    // KEY ASSERTION A: a thrown "database is locked" out of acquire is a test
+    // FAILURE -- busy must be handled as a LOSS, not an error.
+    const busyErrors = [...r0, ...r1].filter((x) => x.result === "busyerror");
+    expect(busyErrors).toEqual([]);
+
+    // KEY ASSERTION B: per round, EXACTLY ONE process acquired, the other got a
+    // clean "notacquired" -- across two real OS processes contending on one DB.
+    const winners: Array<{ round: number; owner: number; fence: number }> = [];
+    for (let round = 0; round < ROUNDS; round++) {
+      const a = r0.find((x) => x.round === round)!;
+      const b = r1.find((x) => x.round === round)!;
+      const acquired = [
+        { owner: 0, line: a },
+        { owner: 1, line: b },
+      ].filter((x) => x.line.result === "acquired");
+      const notAcquired = [a, b].filter((x) => x.result === "notacquired");
+      expect(acquired.length).toBe(1); // exactly one winner
+      expect(notAcquired.length).toBe(1); // the other cleanly lost
+      winners.push({
+        round,
+        owner: acquired[0]!.owner,
+        fence: acquired[0]!.line.fence!,
+      });
+    }
+
+    // KEY ASSERTION C: fences are monotonic (non-decreasing), and strictly
+    // increase whenever ownership actually changes between rounds -- proving the
+    // fencing token advances on every takeover.
+    for (let i = 1; i < winners.length; i++) {
+      expect(winners[i]!.fence).toBeGreaterThanOrEqual(winners[i - 1]!.fence);
+      if (winners[i]!.owner !== winners[i - 1]!.owner) {
+        expect(winners[i]!.fence).toBeGreaterThan(winners[i - 1]!.fence);
+      }
+    }
+  }, 30_000);
 });
