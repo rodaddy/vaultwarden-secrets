@@ -55,6 +55,12 @@ VW_LIB_ONLY=1 \
   REPO_DIR="$FAKE_ROOT" \
   . "$SCRIPT_DIR/deploy.sh"
 
+# Stub systemctl for the rollback tests: this host has no systemd. The rollback
+# functions under test (restore_unit/remove_unit) do real filesystem work; only
+# their systemctl calls need to be inert here. On the live host systemctl is
+# real and its failures are NOT suppressed by the production code.
+systemctl() { return 0; }
+
 # Helper to write a unit file.
 write_unit() {
   # write_unit <path> <user> <execstart-bin> <session> <key> <envfile-line>
@@ -174,6 +180,41 @@ printf '%s\n[Service]\nExecStart=/usr/local/bin/bun run server/mcp.ts\n' \
 rc=$?
 check "DEP-2: unchanged-MCP restart failure restores live unit" 0 "$rc"
 rm -rf "$D2_ROOT"
+
+# --- Case 9: FIRST install of MCP unit, restart fails → unit removed ----------
+# (DEP-2 edge) When no prior MCP unit exists, there is nothing to restore; a
+# failed first start must roll back to "not present" by removing the just-
+# installed unit rather than leaving a broken unit on the host.
+D3_ROOT=$(mktemp -d)
+D3_SYSTEMD="$D3_ROOT/systemd"
+D3_BACKUP="$D3_SYSTEMD/.vw-backup"
+mkdir -p "$D3_SYSTEMD"
+(
+  SYSTEMD_DIR="$D3_SYSTEMD"
+  BACKUP_DIR="$D3_BACKUP"
+  rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+
+  # No live unit exists yet (first install). Pre-restart backup captures nothing.
+  if [ ! -f "$BACKUP_DIR/$MCP_UNIT" ]; then
+    backup_unit "$MCP_UNIT" >/dev/null
+  fi
+  [ -f "$BACKUP_DIR/$MCP_UNIT" ] && _mcp_preexisted=1 || _mcp_preexisted=0
+
+  # The deploy installs the new unit, then the first start fails.
+  printf '# BROKEN-NEW\n' > "$SYSTEMD_DIR/$MCP_UNIT"
+
+  # Rollback branch for a never-existed unit: remove it.
+  if [ "$_mcp_preexisted" -eq 0 ]; then
+    remove_unit "$MCP_UNIT" >/dev/null 2>&1
+    [ ! -f "$SYSTEMD_DIR/$MCP_UNIT" ] && exit 0
+    exit 3
+  fi
+  # Should not reach: a first install must be treated as not pre-existing.
+  exit 2
+)
+rc=$?
+check "DEP-2: first-install restart failure removes the new unit" 0 "$rc"
+rm -rf "$D3_ROOT"
 
 echo ""
 echo "preflight.test.sh: $PASS passed, $FAIL failed"

@@ -235,8 +235,16 @@ deploy_main() {
   # its pre-change version — re-running here is a no-op refresh of that same
   # source. Since the change-sync runs first, re-back-up only when we did NOT
   # already capture it this deploy.
-  if [ ! -f "$BACKUP_DIR/$MCP_UNIT" ]; then
+  # Record whether the MCP unit already existed on the host BEFORE this deploy
+  # installed/updated it. On a failed restart, an updated unit rolls back to its
+  # backed-up previous version; a brand-new unit (no prior version to restore)
+  # rolls back by being removed and stopped, returning to the known "not
+  # present" state instead of leaving a broken unit installed.
+  if [ -f "$BACKUP_DIR/$MCP_UNIT" ]; then
+    _mcp_preexisted=1
+  else
     backup_unit "$MCP_UNIT"
+    [ -f "$BACKUP_DIR/$MCP_UNIT" ] && _mcp_preexisted=1 || _mcp_preexisted=0
   fi
 
   # Restart the protected MCP unit (only ever stopped via its own restart), then
@@ -247,13 +255,18 @@ deploy_main() {
     log "Protected MCP service restarted and healthy"
   else
     err "MCP unhealthy after restart — rolling back $MCP_UNIT"
-    if restore_unit "$MCP_UNIT"; then
+    if [ "$_mcp_preexisted" -eq 1 ] && restore_unit "$MCP_UNIT"; then
       systemctl restart "$MCP_UNIT"
       if verify_mcp_health; then
         err "rolled back to previous $MCP_UNIT (healthy); deploy FAILED"
       else
         err "rollback restart still unhealthy — manual intervention required"
       fi
+    else
+      # First-ever install failed: no prior version to restore. Remove the
+      # just-installed unit and stop it so the host returns to a clean state.
+      remove_unit "$MCP_UNIT"
+      err "new $MCP_UNIT failed first start — removed it; deploy FAILED"
     fi
     exit 1
   fi
@@ -301,6 +314,16 @@ restore_unit() {
   fi
   err "no backup to restore for $_name"
   return 1
+}
+
+# Roll a first-ever install back to "not present": stop and remove the unit that
+# was just installed but never had a prior version to restore.
+remove_unit() {
+  _name="$1"
+  systemctl stop "$_name" 2>/dev/null || true
+  rm -f "$SYSTEMD_DIR/$_name"
+  systemctl daemon-reload
+  log "removed newly-installed $_name (no prior version to roll back to)"
 }
 
 # When sourced by a test harness, stop here (functions only).
