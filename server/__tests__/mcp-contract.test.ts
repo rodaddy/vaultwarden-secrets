@@ -146,7 +146,9 @@ afterAll(() => {
 
 // ---------------------------------------------------------------------------
 // Baseline: the frozen tool contract for SECURITY_PROFILE with allowWrites.
-// feeling-lucky exposes the full 10-tool superset (6 read + 4 write).
+// feeling-lucky exposes the full 11-tool superset (6 read + 5 write).
+// rotate_secret was added by the pilot cutover (#22): GCP-Secret-Manager-style
+// rotation driven through the control plane; additive, allowWrites-gated.
 // ---------------------------------------------------------------------------
 
 const READ_TOOLS = [
@@ -163,6 +165,7 @@ const WRITE_TOOLS = [
   "create_secret",
   "update_secret",
   "delete_secret",
+  "rotate_secret",
 ] as const;
 
 const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
@@ -179,6 +182,7 @@ const REQUIRED_INPUT: Record<string, string[]> = {
   create_secret: ["name"],
   update_secret: ["name"],
   delete_secret: ["name"],
+  rotate_secret: ["connector", "credential", "idempotencyKey"],
 };
 
 // ---------------------------------------------------------------------------
@@ -333,6 +337,21 @@ const EXPECTED_TOOL_SCHEMAS: Record<string, unknown> = {
     },
     annotations: { destructiveHint: true, idempotentHint: false },
   },
+  rotate_secret: {
+    inputSchema: {
+      type: "object",
+      properties: {
+        alias: { type: "string" },
+        connector: { type: "string" },
+        consumers: { type: "array", items: { type: "string" } },
+        credential: { type: "string" },
+        idempotencyKey: { type: "string" },
+        strategy: { type: "string", enum: ["dual", "single"] },
+      },
+      required: ["connector", "credential", "idempotencyKey"],
+    },
+    annotations: { destructiveHint: true, idempotentHint: true },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -417,7 +436,7 @@ describe("tools/list contract", () => {
     tools = res.body.result.tools;
   });
 
-  test("exposes exactly the 10 baseline tools", () => {
+  test("exposes exactly the 11 baseline tools", () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
   });

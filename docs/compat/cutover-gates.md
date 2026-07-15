@@ -64,7 +64,8 @@ test "$status" -eq 0   # HEALTHY required; any nonzero fails the gate
 ```
 
 **Pass:** exit `0` and `"status":"HEALTHY"` with `"toolCount"` matching the
-baseline (10 under `im-aware`). **Fail action:** abort; the current service is
+baseline (10 under `im-aware` pre-#22; **11 after the pilot cutover added
+`rotate_secret`** — see `docs/pilot-cutover.md`). **Fail action:** abort; the current service is
 unhealthy or the token is wrong — investigate before introducing a candidate.
 
 Exit-code contract (from `scripts/mcp-probe.ts`):

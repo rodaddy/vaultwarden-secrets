@@ -25,6 +25,7 @@ import { detectLocalNetwork } from "./utils/network-detect";
 import { responseEncryption } from "./middleware/response-encryption";
 import { createAuthRouter, loadOAuthClients } from "./routes/auth";
 import { FolderScope, loadFolderScopes } from "./utils/folder-scope";
+import { registerSecretReadRoutes } from "./routes/secrets-read";
 import { snapshotManager } from "../snapshot";
 import { getVaultSession } from "../keychain";
 
@@ -209,70 +210,15 @@ app.get("/vaults", async (c: Context) => {
   }
 });
 
-// Get secret by name
-app.get("/secret/:name", async (c: Context) => {
-  const name = decodeURIComponent(c.req.param("name"));
-  const vault = c.req.query("vault") || "default";
-  const clientId = c.get("clientId") as string | undefined;
-
-  // Folder scope check
-  if (clientId && !folderScope.isAllowed(clientId, name)) {
-    return c.json({ error: "Secret not found" }, 404);
-  }
-
-  try {
-    const value = await getSecret(name, { vault });
-    return c.json({ value });
-  } catch (error) {
-    return c.json(
-      { error: error instanceof Error ? error.message : "Secret not found" },
-      404,
-    );
-  }
-});
-
-// Get all fields for a secret
-app.get("/secret/:name/fields", async (c: Context) => {
-  const name = decodeURIComponent(c.req.param("name"));
-  const vault = c.req.query("vault") || "default";
-  const clientId = c.get("clientId") as string | undefined;
-
-  // Folder scope check
-  if (clientId && !folderScope.isAllowed(clientId, name)) {
-    return c.json({ error: "Item not found" }, 404);
-  }
-
-  try {
-    const fields = await getSecretObject(name, { vault });
-    return c.json({ name, fields });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Item not found";
-    const status = message.includes("locked") ? 503 : 404;
-    return c.json({ error: message }, status);
-  }
-});
-
-// List secrets with optional filter
-app.get("/secrets", async (c: Context) => {
-  const filter = c.req.query("filter");
-  const vault = c.req.query("vault") || "default";
-  const clientId = c.get("clientId") as string | undefined;
-
-  try {
-    let secrets = await listSecrets(filter || undefined, { vault });
-
-    // Apply folder scope filtering
-    if (clientId) {
-      secrets = folderScope.filterItems(clientId, secrets);
-    }
-
-    return c.json({ secrets, count: secrets.length });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to list secrets";
-    const status = message.includes("locked") ? 503 : 500;
-    return c.json({ error: message }, status);
-  }
+// Enumeration-parity read routes (get / list / fields). Every authorization
+// denial AND every backend/lookup error routes through one canonical,
+// byte-identical 404 -- see server/routes/secrets-read.ts and docs/authz.md.
+registerSecretReadRoutes(app, {
+  getSecret,
+  getSecretObject,
+  listSecrets,
+  isAllowed: (clientId, name) => folderScope.isAllowed(clientId, name),
+  filterItems: (clientId, names) => folderScope.filterItems(clientId, names),
 });
 
 // Fuzzy search secrets

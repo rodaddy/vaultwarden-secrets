@@ -35,10 +35,12 @@ import {
   importLegacy,
   listSecrets,
   moveAlias,
+  moveAliasCas,
   type AddVersionInput,
   type CreateSecretInput,
   type ImportLegacyInput,
   type MoveAliasInput,
+  type MoveAliasCasInput,
 } from "./lifecycle";
 
 type OperationRow = {
@@ -152,6 +154,10 @@ export class ControlPlaneStore {
   }
   moveAlias(input: MoveAliasInput): VersionMeta {
     return moveAlias(this, input);
+  }
+  /** Atomic compare-and-swap alias move (read+check+write in one tx). */
+  moveAliasCas(input: MoveAliasCasInput): VersionMeta {
+    return moveAliasCas(this, input);
   }
   importLegacy(input: ImportLegacyInput): SecretMeta {
     return importLegacy(this, input);
