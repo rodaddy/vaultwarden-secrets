@@ -94,77 +94,103 @@ afterEach(() => {
   }
 });
 
+/**
+ * Minimal in-memory model of a provider (like Cloudflare) whose tokens are
+ * keyed by a deterministic job-scoped NAME. It reproduces the real failure the
+ * previous test missed: a crash AFTER the provider mints but BEFORE the engine
+ * records the handle leaves an ORPHAN. A resume that blindly re-mints would
+ * double-create; the crash-safe connector must detect+clean the orphan so
+ * exactly one live token remains.
+ */
+class FakeProvider {
+  private seq = 0;
+  readonly live = new Map<string, { name: string }>(); // id -> token
+  mintByName(name: string): { id: string; value: string } {
+    const id = `tok-${++this.seq}`;
+    this.live.set(id, { name });
+    return { id, value: `SECRET-${id}-plaintext-abcdef0123456789` };
+  }
+  deleteOrphansByName(name: string): void {
+    for (const [id, t] of [...this.live])
+      if (t.name === name) this.live.delete(id);
+  }
+  countByName(name: string): number {
+    return [...this.live.values()].filter((t) => t.name === name).length;
+  }
+}
+
+/** Connector over FakeProvider that models the crash-safe create contract. */
+function providerConnector(
+  provider: FakeProvider,
+  opts: { crashAfterMint?: boolean } = {},
+): Connector {
+  return {
+    async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
+      const name = `rotation-${ctx.secret}-${ctx.jobId}`;
+      // Crash-safe: clean any orphan from a prior crashed attempt, then mint one.
+      provider.deleteOrphansByName(name);
+      const tok = provider.mintByName(name);
+      const w = await ctx.vault.writeItem(`${name}#${tok.id}`, () => tok.value);
+      if (opts.crashAfterMint) {
+        // Simulate a process crash AFTER the mint + vault write but BEFORE the
+        // engine can persist the provider handle / checkpoint.
+        throw new Error("SIMULATED CRASH after mint, before checkpoint");
+      }
+      return {
+        payloadRef: w.payloadRef,
+        checksum: w.checksum,
+        providerRef: tok.id,
+      };
+    },
+    async verify() {
+      return true;
+    },
+    async revoke() {},
+    async rollback() {},
+  };
+}
+
 describe("crash-resume (two connections, one file db)", () => {
-  test("crash in the gap between provider-create effect and its checkpoint is safe (no double create)", async () => {
+  test("TRUE crash after provider mint (before checkpoint) -> resume leaves exactly one live token", async () => {
     const path = tmpDbPath();
     const shared = newShared();
+    const provider = new FakeProvider();
+    const name = "rotation-svc-token-job-1";
 
-    // Barrier: create() writes material to the vault (durable side effect),
-    // then BLOCKS before returning -- modelling a crash after the effect but
-    // before the engine can persist the provider-created checkpoint.
-    let createReached!: () => void;
-    const createHit = new Promise<void>((r) => (createReached = r));
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    let createCount = 0;
-
-    const crashingConn: Connector = {
-      async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
-        createCount++;
-        const w = await ctx.vault.writeItem(
-          `${ctx.secret}#${ctx.jobId}`,
-          () => SENTINEL,
-        );
-        createReached();
-        await gate; // "crash" here: never returns for this executor
-        return {
-          payloadRef: w.payloadRef,
-          checksum: w.checksum,
-          providerRef: `prov-${ctx.jobId}`,
-        };
-      },
-      async verify() {
-        return true;
-      },
-      async revoke() {},
-      async rollback() {},
-    };
-
-    // Executor 1: its own connection; starts the job, hangs in create().
+    // Executor 1: seeds the job, then a single step MINTS at the provider but
+    // "crashes" (throws) before the engine records the provider handle. The
+    // step's error handling leaves the job at 'requested' with NO provider ref
+    // -- exactly the pre-checkpoint crash window. Then the connection dies.
     const db1 = new Database(path);
-    const e1 = new RotationEngine(db1, depsFor(shared, crashingConn));
-    const p1 = e1.rotate(req({ jobId: "job-1" }));
-    await createHit; // effect done, checkpoint NOT yet written
+    const e1 = new RotationEngine(db1, {
+      ...depsFor(shared, providerConnector(provider, { crashAfterMint: true })),
+      leaseTtlMs: 60_000,
+    });
+    await e1.startJob(req({ jobId: "job-1" }));
+    await e1.step("job-1"); // mints at provider, throws before persisting handle
 
-    // Simulate crash: abandon p1's lease by expiring time is heavy; instead we
-    // just proceed -- executor 1 still "holds" a live lease, so executor 2 must
-    // be blocked until the lease expires. Prove that here:
+    // The engine never recorded a provider handle (crash was pre-checkpoint)...
+    const stalled = e1.getReceipt("job-1");
+    expect(stalled.stage).toBe("requested");
+    expect(stalled.newPayloadRef).toBeNull();
+    // ...yet the provider has exactly one orphan token from the mint.
+    expect(provider.countByName(name)).toBe(1);
+    db1.close(); // process is gone
+
+    // Executor 2: fresh connection + fresh executor id, crash-safe connector.
     const db2 = new Database(path);
-    // A job-scoped-idempotent connector: reuses the SAME material, no 2nd write.
-    const e2 = new RotationEngine(
-      db2,
-      depsFor(shared, new TestConnector({ material: SENTINEL })),
-    );
-    // Same idempotency key -> returns the existing (in-flight) job, no rotation.
-    const dup = await e2.rotate(req({ jobId: "job-1" }));
-    expect(dup.jobId).toBe("job-1");
+    const e2 = new RotationEngine(db2, {
+      ...depsFor(shared, providerConnector(provider)),
+      leaseTtlMs: 60_000,
+    });
+    const resumed = await e2.resumePending();
+    expect(resumed.length).toBe(1);
+    expect(resumed[0]!.stage).toBe("done");
 
-    // Let executor 1 finish; it drives to done.
-    release();
-    const r1 = await p1;
-    expect(r1.stage).toBe("done");
+    // THE ASSERTION THE OLD TEST MISSED: after resume, exactly ONE live token
+    // for this job -- the orphan was cleaned, not double-created.
+    expect(provider.countByName(name)).toBe(1);
 
-    // Exactly ONE credential minted despite the crash gap: the crashing
-    // connector's create ran once (executor 1); executor 2 short-circuited on
-    // idempotency and never called create.
-    expect(createCount).toBe(1);
-    // Only one vault write for this job (no double-create).
-    const writes = [...shared.vault.stored.keys()].filter((k) =>
-      k.startsWith("svc-token#job-1"),
-    );
-    expect(writes.length).toBe(1);
-
-    db1.close();
     db2.close();
   });
 

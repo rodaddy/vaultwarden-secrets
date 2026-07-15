@@ -452,11 +452,31 @@ export class RotationEngine {
     }
     const result = await this.deps.connector.create(this.ctx(job, leak));
     leak.assertClean(result, "connector.create result");
-    await this.transition(job, "provider-created", leak, lease, attempt, {
-      newPayloadRef: result.payloadRef,
-      newChecksum: result.checksum,
-      newProviderRef: result.providerRef ?? null,
-    });
+    // Persist the provider handle + refs in a dedicated fenced write BEFORE the
+    // stage transition, so a crash between mint and the transition checkpoint
+    // still leaves the handle durably recorded. On resume the guard at the top
+    // of this stage sees newProviderRef set and ADOPTS it (no re-mint). Even if
+    // this write itself is lost, the connector's create is provider-idempotent
+    // (deterministic job-scoped handle: orphan detected + cleaned on re-create).
+    this.store.updateJob(
+      job.id,
+      {
+        newPayloadRef: result.payloadRef,
+        newChecksum: result.checksum,
+        newProviderRef: result.providerRef ?? null,
+      },
+      this.now(),
+      lease.fence,
+    );
+    const adopted = this.store.getJob(job.id)!;
+    await this.transition(
+      adopted,
+      "provider-created",
+      leak,
+      lease,
+      attempt,
+      {},
+    );
   }
 
   /** provider-created -> staged: register immutable version in control plane. */
@@ -595,7 +615,14 @@ export class RotationEngine {
       }
       await this.deps.connector.revoke(this.ctx(job, leak));
     } catch (err) {
-      await this.markReconcile(job, "revoke", this.errMsg(err), leak, lease);
+      // Sanitize BEFORE it reaches the persisted reconcile detail.
+      await this.markReconcile(
+        job,
+        "revoke",
+        this.safeErr(err, leak, "revoke error"),
+        leak,
+        lease,
+      );
       return;
     }
     await this.transition(job, "old-revoked", leak, lease, attempt, {});
@@ -656,6 +683,8 @@ export class RotationEngine {
       }
       await this.deps.connector.rollback(this.ctx(rb, leak));
     } catch (err) {
+      // Sanitize ONCE, then use the clean string for every persisted surface.
+      const safe = this.safeErr(err, leak, "rollback error");
       // Stay in rolling-back (effect-pending) if retries remain; else reconcile.
       const attempts = this.store.attemptsFor(rb.id, "rolling-back") + 1;
       this.store.appendCheckpoint(
@@ -663,14 +692,12 @@ export class RotationEngine {
         "rolling-back",
         "error",
         attempts,
-        JSON.stringify(
-          leak.assertClean({ error: this.errMsg(err) }, "rollback error"),
-        ),
+        JSON.stringify({ error: safe }),
         this.now(),
         lease.fence,
       );
       if (attempts < this.maxAttempts) return; // retry rollback on next loop
-      await this.markReconcile(rb, "rollback", this.errMsg(err), leak, lease);
+      await this.markReconcile(rb, "rollback", safe, leak, lease);
       return;
     }
     await this.transition(rb, "rolled-back", leak, lease, attempt, {});
@@ -737,10 +764,18 @@ export class RotationEngine {
     leak: LeakGuard,
     lease: LeaseHandle,
   ): Promise<void> {
+    // Defense in depth: sanitize the detail before it reaches ANY persisted or
+    // emitted surface (the external reconcile store AND the fenced job row).
+    // Callers should already pass a sanitized string, but this is the final
+    // chokepoint so a raw payload-bearing message can never land here.
+    const safeDetail = leak.sanitizeError(
+      detail,
+      `reconcile detail (${op})`,
+    ).message;
     await this.deps.store.markReconcileRequired({
       op,
       secret: job.secret,
-      detail,
+      detail: safeDetail,
     });
     await this.transition(
       job,
@@ -748,8 +783,17 @@ export class RotationEngine {
       leak,
       lease,
       this.store.attemptsFor(job.id, job.stage) + 1,
-      { error: `${op}: ${detail}` },
+      { error: `${op}: ${safeDetail}` },
     );
+  }
+
+  /**
+   * Sanitized error string for persistence/emission. Routes the value through
+   * the armed LeakGuard: if it embeds registered material it is replaced with a
+   * SecretLeakError message (identifiers only), never the payload.
+   */
+  private safeErr(err: unknown, leak: LeakGuard, where: string): string {
+    return leak.sanitizeError(err, where).message;
   }
 
   // -----------------------------------------------------------------------

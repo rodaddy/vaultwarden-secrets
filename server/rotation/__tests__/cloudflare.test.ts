@@ -26,6 +26,10 @@ describe("CloudflareConnector (offline, stubbed fetch)", () => {
     const calls: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       calls.push(`${init?.method} ${url}`);
+      // orphan-scan list call: no pre-existing tokens
+      if (String(url).endsWith("/user/tokens") && init?.method === "GET") {
+        return cfEnvelope([]);
+      }
       if (String(url).endsWith("/user/tokens") && init?.method === "POST") {
         return cfEnvelope({
           id: "new-id",
@@ -53,6 +57,50 @@ describe("CloudflareConnector (offline, stubbed fetch)", () => {
     expect(JSON.stringify(res).includes(PLAINTEXT)).toBe(false);
     // plaintext IS in the vault
     expect([...vault.stored.values()]).toContain(PLAINTEXT);
+  });
+
+  test("create deletes a job-scoped orphan before minting (crash recovery)", async () => {
+    const PLAINTEXT = "cf-fresh-token-plaintext-abcdef0123456789-secret";
+    const name = "rotation-cf-dns-jobX";
+    const deleted: string[] = [];
+    let minted = 0;
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/user/tokens") && init?.method === "GET") {
+        // an orphan from a crashed prior attempt carries the job-scoped name
+        return cfEnvelope([
+          { id: "orphan-id", name, status: "active" },
+          { id: "unrelated", name: "someone-else", status: "active" },
+        ]);
+      }
+      if (u.includes("/user/tokens/orphan-id") && init?.method === "DELETE") {
+        deleted.push("orphan-id");
+        return cfEnvelope({ id: "orphan-id" });
+      }
+      if (u.endsWith("/user/tokens") && init?.method === "POST") {
+        minted++;
+        return cfEnvelope({
+          id: "fresh-id",
+          name,
+          status: "active",
+          value: PLAINTEXT,
+        });
+      }
+      throw new Error(`unexpected ${init?.method} ${u}`);
+    }) as unknown as typeof fetch;
+
+    const conn = new CloudflareConnector({ apiToken: "mgmt", fetchImpl });
+    const vault = new InMemoryVaultWriter();
+    const res = await conn.create({
+      jobId: "jobX",
+      secret: "cf-dns",
+      strategy: "dual",
+      vault,
+    });
+    // orphan deleted, exactly one fresh mint, unrelated token untouched
+    expect(deleted).toEqual(["orphan-id"]);
+    expect(minted).toBe(1);
+    expect(res.providerRef).toBe("fresh-id");
   });
 
   test("verify probes /user/tokens/verify AS the new token (bearer from vault)", async () => {

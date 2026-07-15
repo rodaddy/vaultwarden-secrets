@@ -155,6 +155,29 @@ describe("no-secret-leak guard", () => {
     const cks = h.db.query("SELECT detail FROM rotation_checkpoints").all();
     expect(JSON.stringify(cks).includes(SENTINEL)).toBe(false);
   });
+
+  test("revoke error embedding the sentinel is scrubbed from the reconcile detail", async () => {
+    // Post-publish revoke throws an error whose message embeds the sentinel.
+    // The engine routes it to reconcile-required; the sentinel must NEVER reach
+    // the persisted reconcile detail (external store) OR the terminal job row.
+    const h = makeHarness(
+      {},
+      { failOn: "revoke", failTimes: 99, failWith: SENTINEL },
+    );
+    const receipt = await h.engine.rotate(req());
+    expect(receipt.stage).toBe("reconcile-required");
+    // alias was published (post-publish), so this is the revoke->reconcile path
+    expect(h.store.aliasVersion("Cloudflare - DNS API", "current")).toBe(1);
+    // the reconcile op was recorded...
+    const revokeOps = h.store.reconcile.filter((o) => o.op === "revoke");
+    expect(revokeOps.length).toBeGreaterThan(0);
+    // ...but its detail is sanitized -- no sentinel anywhere in reconcile rows.
+    expect(JSON.stringify(h.store.reconcile).includes(SENTINEL)).toBe(false);
+    // and the terminal job row's error field is clean too.
+    const jobRows = h.db.query("SELECT error FROM rotation_jobs").all();
+    expect(JSON.stringify(jobRows).includes(SENTINEL)).toBe(false);
+    assertNoLeak(h);
+  });
 });
 
 describe("idempotency", () => {

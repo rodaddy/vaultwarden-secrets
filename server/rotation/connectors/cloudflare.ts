@@ -111,6 +111,29 @@ export class CloudflareConnector implements Connector {
   }
 
   /**
+   * Delete any pre-existing tokens carrying the deterministic job-scoped name
+   * (orphans left by a crashed prior attempt). Safe: such a token was never
+   * staged / verified / published, so removing it cannot affect a live
+   * consumer. Idempotent -- a no-op when none exist.
+   */
+  private async deleteOrphansByName(name: string): Promise<void> {
+    const existing = await this.call<CfToken[]>(
+      "GET",
+      "/user/tokens",
+      this.cfg.apiToken,
+    );
+    for (const tok of existing) {
+      if (tok.name === name) {
+        await this.call<{ id: string }>(
+          "DELETE",
+          `/user/tokens/${tok.id}`,
+          this.cfg.apiToken,
+        );
+      }
+    }
+  }
+
+  /**
    * Create a replacement token that mirrors the old token's policies. The old
    * token id is carried on ctx.oldProviderRef so we can read its policy set;
    * a fresh name is derived from the job id.
@@ -126,13 +149,16 @@ export class CloudflareConnector implements Connector {
       );
       policies = old.policies;
     }
-    // Job-scoped idempotency: the token name embeds the jobId. If a crash left a
-    // half-created token from THIS job, a fresh mint would double-create. We
-    // cannot re-read the plaintext of an existing token from Cloudflare (only
-    // returned once at create), so the engine's create-intent + vault check
-    // guards the common case; here we always mint but with a deterministic,
-    // job-scoped name so orphans are attributable and cleanable.
+    // Deterministic job-scoped name. Crash-safe minting: if a prior attempt
+    // crashed AFTER minting but BEFORE the engine recorded the provider ref, an
+    // orphan token with THIS name is left at Cloudflare. Cloudflare returns a
+    // token's plaintext ONLY once (at create), so we cannot adopt the orphan's
+    // secret -- instead we DELETE it (it was never staged/verified/published,
+    // so removal is safe) and mint exactly one fresh token. Net effect: at most
+    // one LIVE token per job, regardless of crashes.
     const name = `rotation-${ctx.secret}-${ctx.jobId}`.slice(0, 120);
+    await this.deleteOrphansByName(name);
+
     const created = await this.call<CfToken>(
       "POST",
       "/user/tokens",

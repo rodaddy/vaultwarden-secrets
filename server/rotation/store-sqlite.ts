@@ -34,17 +34,25 @@ const MIGRATION_PATH = join(
   "200_rotation.sql",
 );
 
-/** Apply the rotation migration to an injected db handle (idempotent). */
-export function applyRotationMigration(db: Database): void {
-  // WAL + a busy timeout let two connections to the same file db serialize
-  // writers gracefully (the fencing logic assumes writes eventually land or
-  // fail, not deadlock). No-op / harmless for :memory: databases.
+/**
+ * Set per-connection pragmas that make two connections to the SAME file db
+ * serialize writers gracefully instead of erroring with SQLITE_BUSY. Must run
+ * on EVERY connection (WAL is a db property, but busy_timeout is per-connection),
+ * so this is separate from the migration and called from the constructor
+ * regardless of autoMigrate. No-op / harmless for :memory: databases.
+ */
+export function applyConnectionPragmas(db: Database): void {
   try {
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA busy_timeout = 5000");
   } catch {
     // Some handles (e.g. shared-cache :memory:) reject WAL; ignore.
   }
+}
+
+/** Apply the rotation migration to an injected db handle (idempotent). */
+export function applyRotationMigration(db: Database): void {
+  applyConnectionPragmas(db);
   const sql = readFileSync(MIGRATION_PATH, "utf8");
   db.run(sql);
 }
@@ -173,6 +181,9 @@ export class RotationStore {
     private db: Database,
     autoMigrate = true,
   ) {
+    // Per-connection pragmas ALWAYS (even when the schema is already migrated by
+    // another connection) so cross-connection contention serializes, not errors.
+    applyConnectionPragmas(db);
     if (autoMigrate) applyRotationMigration(db);
   }
 
@@ -370,18 +381,12 @@ export class RotationStore {
     ttlMs: number,
   ): LeaseHandle | null {
     const expires = now + ttlMs;
+    // BEGIN IMMEDIATE: take a RESERVED lock at statement 1 so two connections
+    // to the same file db serialize here -- one runs the whole body, the other
+    // waits (busy_timeout) and then sees the committed lease. No two writers
+    // interleave inside this critical section.
     const txn = this.db.transaction((): LeaseHandle | null => {
-      // Is there a live lease held by someone else? (single read inside the
-      // exclusive txn -- no interleave possible).
-      const live = this.db
-        .query(
-          `SELECT owner FROM rotation_leases
-           WHERE secret = ? AND expires_at > ? AND owner <> ?`,
-        )
-        .get(secret, now, owner) as { owner: string } | null;
-      if (live) return null;
-
-      // Mint the next fencing token atomically.
+      // Mint the next fencing token (monotonic).
       this.db
         .query("UPDATE rotation_fence_seq SET value = value + 1 WHERE id = 0")
         .run();
@@ -391,38 +396,40 @@ export class RotationStore {
           .get() as { value: number }
       ).value;
 
-      // Conditional upsert: claim/refresh the lease. The WHERE on the DO UPDATE
-      // ensures we never steal a live lease from a different owner (belt &
-      // suspenders alongside the read above).
-      this.db
+      // Single conditional claim: succeeds only if an existing row is expired
+      // or already ours. `changes` tells us if we won without any read-then-
+      // decide window.
+      const upd = this.db
         .query(
-          `INSERT INTO rotation_leases (secret, owner, fence, expires_at, acquired_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(secret) DO UPDATE SET
-             owner = excluded.owner,
-             fence = excluded.fence,
-             expires_at = excluded.expires_at,
-             acquired_at = excluded.acquired_at
-           WHERE rotation_leases.expires_at <= ?
-              OR rotation_leases.owner = excluded.owner`,
+          `UPDATE rotation_leases
+             SET owner = ?, fence = ?, expires_at = ?, acquired_at = ?
+           WHERE secret = ?
+             AND (expires_at <= ? OR owner = ?)`,
         )
-        .run(secret, owner, fence, expires, now, now);
+        .run(owner, fence, expires, now, secret, now, owner);
 
-      // Confirm we actually hold it (the conditional upsert may no-op if a
-      // live foreign lease existed -- already excluded above, but verify).
-      const held = this.db
-        .query(
-          "SELECT owner, fence, expires_at FROM rotation_leases WHERE secret = ?",
-        )
-        .get(secret) as {
-        owner: string;
-        fence: number;
-        expires_at: number;
-      } | null;
-      if (!held || held.owner !== owner || held.fence !== fence) return null;
-      return { secret, owner, fence, expiresAt: held.expires_at };
+      if (upd.changes === 1) {
+        return { secret, owner, fence, expiresAt: expires };
+      }
+
+      // No row updated: either no lease row exists yet, or a live foreign lease
+      // holds it. Try to INSERT -- the PRIMARY KEY on `secret` rejects the race
+      // if a row already exists (live foreign lease -> constraint -> caught).
+      try {
+        this.db
+          .query(
+            `INSERT INTO rotation_leases (secret, owner, fence, expires_at, acquired_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(secret, owner, fence, expires, now);
+        return { secret, owner, fence, expiresAt: expires };
+      } catch {
+        // Row already exists and is a live foreign lease: we do not hold it.
+        return null;
+      }
     });
-    return txn();
+    // .immediate() forces BEGIN IMMEDIATE for cross-connection serialization.
+    return txn.immediate();
   }
 
   /**

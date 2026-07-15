@@ -16,7 +16,10 @@ safely and leaves a recoverable state.
   write material through an ARMING `VaultWriter` proxy that registers each
   written value with a job-scoped `LeakGuard`; the guard stays armed for every
   later stage, scans every persisted/emitted value AND sanitizes stage errors,
-  and throws `SecretLeakError` (fail closed) if a value would leak.
+  and throws `SecretLeakError` (fail closed) if a value would leak. EVERY error
+  string that can reach a persisted/emitted surface (checkpoint error, reconcile
+  detail, terminal job `error`, audit, outbox) is routed through the armed guard
+  (`safeErr` / `markReconcile` sanitize as the final chokepoint) before it lands.
 - **Fail-closed authorization.** `rotate`, `move-alias`, `revoke`, AND
   `rollback` are each authorized via the injected `Authorize` dep before their
   effect runs. A denied `revoke`/`rollback` after publish escalates to
@@ -25,16 +28,25 @@ safely and leaves a recoverable state.
   credential (never the management credential); inability to probe returns
   `false` and fails closed. `revoke()` runs only after `verify()` passes AND the
   alias has moved. First issuance (no prior credential) skips revoke entirely.
-- **Serialized per credential (fenced lease).** The lease is acquired with a
-  SINGLE atomic conditional write, owned by a PER-EXECUTION uuid (not the job
-  id, so two resume runs can't collude as one owner), and carries a monotonic
-  fencing token. The lease is revalidated/renewed around every awaited effect;
-  every persisted write is fenced, so an executor that lost the lease aborts
-  before mutating. Duplicate `idempotencyKey` returns the existing job.
+- **Serialized per credential (fenced lease).** The lease is acquired inside a
+  `BEGIN IMMEDIATE` transaction (RESERVED lock at statement 1, so two
+  connections to the same file db serialize here) via a SINGLE conditional claim
+  (`UPDATE ... WHERE expires_at <= ? OR owner = ?`, checked by `changes`, with an
+  `INSERT` fallback the PRIMARY KEY rejects on a race) -- no read-then-decide
+  window. Owned by a PER-EXECUTION uuid (not the job id, so two resume runs can't
+  collude as one owner); carries a monotonic fencing token. Revalidated/renewed
+  around every awaited effect; every persisted write is fenced, so an executor
+  that lost the lease aborts before mutating. Duplicate `idempotencyKey` returns
+  the existing job.
 - **Crash-safe creation.** A durable creation-intent is set BEFORE the
-  connector/vault create call; connectors are job-scoped-idempotent, so a crash
-  between create and its checkpoint reuses the existing credential instead of
-  minting a second one.
+  connector/vault create call, and the provider handle + refs are persisted in a
+  dedicated fenced write immediately after the mint (before the stage
+  transition). On resume, a recorded provider handle is ADOPTED (no re-mint).
+  Even if that write is lost, connectors are provider-idempotent via a
+  deterministic job-scoped handle: the Cloudflare connector LISTs tokens by the
+  job-scoped name and DELETEs any orphan from a crashed prior attempt before
+  minting exactly one fresh token -- so at most one LIVE credential per job
+  survives any crash.
 - **Never rollback after publish.** Once the alias may point at the new version,
   any failure fails closed to `reconcile-required`. Rollback (credential
   deletion) is only reachable on a pre-publish failure. On resume, an alias

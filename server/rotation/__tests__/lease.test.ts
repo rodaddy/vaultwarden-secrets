@@ -2,8 +2,11 @@
  * Direct unit tests for the atomic, fenced lease in RotationStore.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RotationStore, FencedOutError } from "../store-sqlite";
 
 function store(): { s: RotationStore; db: Database } {
@@ -92,5 +95,59 @@ describe("atomic fenced lease", () => {
     // A releasing its (stale) handle must not delete B's live lease
     s.releaseLease(a);
     expect(s.liveFence("secret", 2001)).not.toBeNull();
+  });
+});
+
+describe("atomic lease across TWO connections to one file db", () => {
+  let dir: string | null = null;
+  afterEach(() => {
+    if (dir) {
+      rmSync(dir, { recursive: true, force: true });
+      dir = null;
+    }
+  });
+
+  test("two independent connections racing for the same credential: exactly one wins", async () => {
+    dir = mkdtempSync(join(tmpdir(), "vw-lease-"));
+    const path = join(dir, "lease.sqlite");
+    // Two RotationStore instances over two independent connections (two
+    // "processes"). Both try to acquire the SAME credential at the SAME logical
+    // time in many concurrent attempts; the atomic BEGIN IMMEDIATE + single
+    // conditional claim must let exactly one win each round.
+    const dbA = new Database(path);
+    const dbB = new Database(path);
+    const sA = new RotationStore(dbA);
+    const sB = new RotationStore(dbB, false); // migration already applied by A
+
+    const ROUNDS = 40;
+    let bothWon = 0;
+    let neitherWon = 0;
+    for (let i = 0; i < ROUNDS; i++) {
+      const now = 1_000_000 + i * 1000;
+      // Fire both acquires "concurrently" (Promise.all over sync calls with the
+      // busy_timeout serializing the writers between the two connections).
+      const [a, b] = await Promise.all([
+        Promise.resolve().then(() =>
+          sA.acquireLease("shared-cred", `A-${i}`, now, 100),
+        ),
+        Promise.resolve().then(() =>
+          sB.acquireLease("shared-cred", `B-${i}`, now, 100),
+        ),
+      ]);
+      const winners = [a, b].filter((x) => x !== null);
+      // INVARIANT: never two simultaneous live owners of the same credential.
+      if (winners.length === 2) bothWon++;
+      if (winners.length === 0) neitherWon++;
+      // Exactly one winner each round (the prior round's lease has expired by
+      // `now` since ttl=100 << 1000ms step).
+      expect(winners.length).toBe(1);
+      // Fences are globally monotonic across both connections.
+      expect(winners[0]!.fence).toBeGreaterThan(0);
+    }
+    expect(bothWon).toBe(0);
+    expect(neitherWon).toBe(0);
+
+    dbA.close();
+    dbB.close();
   });
 });
