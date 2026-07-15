@@ -721,6 +721,15 @@ function createMcpServer(subject: string): McpServer {
             credential,
           );
 
+          // SECURITY (F1): namespace the caller's idempotency key by the
+          // credential so it is scoped PER-SECRET. The rotation store's
+          // idempotency key is globally unique; without this, a caller reusing a
+          // key across secrets could receive another secret's job (metadata
+          // leak) or suppress a legitimate rotation of a different secret. The
+          // \x1f (unit separator) is unambiguous even if a part contains it and
+          // cannot collide across distinct credentials.
+          const scopedIdempotencyKey = `${credential}${idempotencyKey}`;
+
           // Redacted receipt: identifiers/hashes only (the type is already
           // redacted). Subject is the authenticated workload identity; the
           // engine authorizes rotate/move-alias/revoke via default-deny authz.
@@ -729,7 +738,7 @@ function createMcpServer(subject: string): McpServer {
             connector,
             strategy: strategy ?? "dual",
             consumers: consumers ?? [],
-            idempotencyKey,
+            idempotencyKey: scopedIdempotencyKey,
             subject,
             alias,
             oldProviderRef: superseded.oldProviderRef,

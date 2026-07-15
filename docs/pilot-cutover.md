@@ -111,42 +111,53 @@ to diverge on `tools/list`; the candidate's own frozen baseline is
   reconciliation records) instead of an unsafe revert. A failed pre-publish
   rotation rolls back only the new credential, leaving the old one intact.
 
-## Known bound: terminal audit/outbox emission is best-effort (F3)
+## Known bound: audit/outbox emission is best-effort; the STAGE checkpoint is durable (F3)
 
 The rotation-job durability (`rotation_jobs` / `rotation_checkpoints`) lives in
 a **separate SQLite database** from the control-plane audit ledger + outbox
-(`audit_ledger` / `outbox_events`). The wiring adapters
-(`AuditAdapter`/`OutboxAdapter` in `server/rotation/wiring.ts`) emit each
-stage's audit row and outbox event in their **own** control-plane transaction,
-which is distinct from the rotation-job checkpoint write the engine performs in
-the rotation DB. A single transaction cannot span the two databases, and the
-engine/`deps.ts` contract is intentionally not modified, so a cross-store
-atomic write is out of scope here.
+(`audit_ledger` / `outbox_events`). Per transition the engine writes the fenced
+job update + checkpoint (rotation DB) and then, as a **separate** step, awaits
+`emit`, which the wiring adapters (`AuditAdapter`/`OutboxAdapter` in
+`server/rotation/wiring.ts`) commit in their **own** control-plane transaction.
+A single transaction cannot span the two databases, and the engine/`deps.ts`
+contract is intentionally not modified, so a cross-store atomic write is out of
+scope here.
 
-**Guarantee (at-least-once for pre-terminal stages).** For every stage up to
-and including `alias-moved` and `old-revoked`, the engine advances only after
-the stage's checkpoint is durable, and the audit + outbox rows for that stage
-are committed to the control-plane DB as it goes. A crash before `done`
-therefore leaves the job **non-terminal**, so `resumePending()` reclaims and
-re-drives it, and every prior stage's audit/outbox row is already durable.
-This is proven by
-`server/rotation/__tests__/wiring.test.ts` → "F3: every PRE-terminal stage's
-audit+outbox is durably committed".
+**What is durable: the fenced STAGE checkpoint.** The authoritative record of
+effect-applied progress is the fenced `updateJob` + `rotation_checkpoints` write
+in the rotation DB, committed *before* the audit/outbox emit for that stage.
+This is what drives `resumePending()` and what tells the system which effects
+(create, stage, alias-move, revoke) have been applied. It is durable at every
+stage, terminal and non-terminal alike.
 
-**Bound (best-effort terminal `done` event).** The final `old-revoked → done`
-transition commits the job/checkpoint first, then emits the
-`rotation.done`/`rotation.done.ok` audit + outbox rows. If the process dies in
-the window between those two commits, the job is already terminal (`done`) and
-is excluded from `resumePending()`, so the `rotation.done` audit row and
-`rotation.done.ok` outbox event can be **permanently absent**. This does NOT
-affect correctness of the rotation itself — the alias is published, the old
-credential revoked, and every *pre-terminal* lifecycle event (including
-`alias-moved` and `old-revoked`) is durable — only the terminal *notification*
-is best-effort. A durable-with-checkpoint or replay-based fix would require
-either an engine change (same-transaction emit) or a cross-store reconcile
-pass, both deferred; consumers that must observe completion should treat the
-presence of `rotation.old-revoked.ok` (durable) plus the job's terminal `done`
-stage as authoritative, not the `rotation.done.ok` event alone.
+**What is best-effort: the audit/outbox EMISSION at each stage boundary.**
+Because the emit happens in a distinct transaction *after* the checkpoint
+commits, a crash in the window between the two drops that stage's
+`rotation.<stage>` ledger row and `rotation.<stage>.<outcome>` outbox event —
+for **any** stage, including `old-revoked` and the terminal `done`. The claim
+that a given stage's ledger/outbox row is durable-with-the-checkpoint does
+**not** hold; only the checkpoint itself is.
+
+- For a **non-terminal** stage, the miss is self-healing: the job is still
+  non-terminal, so `resumePending()` re-drives it and the stage re-emits. Under
+  the delivered rotation (no mid-flight crash) every pre-terminal stage's
+  audit + outbox row is present — proven by
+  `server/rotation/__tests__/wiring.test.ts` → "F3: every PRE-terminal stage's
+  audit+outbox is durably committed" (a durability check of the emitted rows on
+  the happy path, not a crash-durability guarantee).
+- For the **terminal** `old-revoked → done` transition, there is no resume: the
+  job is already terminal and excluded from `resumePending()`, so a crash
+  between the terminal checkpoint and its emit leaves the `rotation.done` /
+  `rotation.old-revoked` audit + outbox rows **permanently absent**.
+
+This never affects rotation **correctness** — the effects (alias published, old
+credential revoked) are applied and durably recorded by the fenced checkpoints;
+only the *notifications* are best-effort. A durable-with-checkpoint or
+replay-based fix would require an engine change (same-transaction emit) or a
+cross-store reconcile pass, both deferred. Consumers that must observe an
+outcome should treat the durable job **stage** in `rotation_jobs` (e.g. terminal
+`done`, or `old-revoked` reached) as authoritative, not the corresponding
+`rotation.*` audit/outbox event.
 
 ## REST enumeration parity (PR-D deferred item, closed here)
 
@@ -166,7 +177,8 @@ exist or which they may access. Byte-equivalence is proven in
 - `bun test server/rotation/__tests__/wiring.test.ts` — adapter hazards (CAS,
   audit/outbox tx, reconcile shape), least-privilege rotation authz
   (`rotate.revoke`/`rotate.rollback` vs `secret.destroy`, F2), server-side
-  revoke-target derivation (F1), pre-terminal durability (F3), vault checksum
+  revoke-target derivation including newest-published-job and per-secret
+  idempotency scoping (F1), happy-path stage emission (F3), vault checksum
   non-leak, and full end-to-end rotations against the real control-plane store.
 - `bun test server/__tests__/secrets-read-parity.test.ts` — REST byte-equivalence.
 - `bun test server/__tests__/folder-scope-legacy.test.ts` — legacy scoped token
@@ -178,16 +190,29 @@ exist or which they may access. Byte-equivalence is proven in
 
 - **F1 (P0):** `rotate_secret` no longer accepts `oldProviderRef`/`oldPayloadRef`
   from the caller. The revoke target is derived server-side via
-  `resolveSupersededRefs` (the prior completed rotation job for THIS secret in
-  `rotation_jobs`), so a caller authorized to rotate secretA can never cause a
-  provider-side GET/DELETE against an unrelated credential id.
+  `resolveSupersededRefs`, which reads the most recent **published** rotation
+  job for THIS secret (`getLastPublishedJob`: stage in
+  `done`/`old-revoked`/`reconcile-required` with a recorded provider handle),
+  so a caller authorized to rotate secretA can never cause a provider-side
+  GET/DELETE against an unrelated credential id. Selecting the newest *published*
+  job — not merely the newest `done` one — ensures a rotation that published
+  then failed its revoke (`reconcile-required`) is the revoke target, so the
+  actually-live stale credential is the one revoked (F1 stale-job fix). The MCP
+  tool also namespaces the caller idempotency key by credential
+  (`<credential>\x1f<key>`), scoping it per-secret so a reused key cannot return
+  or suppress another secret's rotation.
 - **F2 (P1):** rotation revoke/rollback are first-class authz actions
   (`rotate.revoke`, `rotate.rollback`) rather than overloaded `secret.destroy`,
   restoring least-privilege — a rotate role completes rotation without
   `secret.destroy`, and `secret.destroy` alone grants no rotation capability.
-- **F3 (P1):** documented above as a known bound (pre-terminal at-least-once;
-  terminal `done` event best-effort) with a durability test — the atomic fix is
-  out of scope without changing the engine or spanning two databases.
+- **F3 (P1):** documented above as a known bound — the fenced job **stage
+  checkpoint** is the durable, authoritative record; audit/outbox **emission**
+  is best-effort at every stage boundary (self-healing for non-terminal stages
+  via resume, permanently missable for terminal `done`). The atomic fix is out
+  of scope without changing the engine or spanning two databases.
 - **F4 (P0):** `FolderScope` normalizes `legacy:<client>` subjects to the scope
-  key `<client>`, so a legacy folder-scoped token fails closed to its folder
-  instead of being treated as unrestricted.
+  key `<client>` (stripping the prefix defensively, even if doubled), and a
+  client that is **configured** as restricted fails **closed** — denying all
+  items — when its folders do not resolve or before init completes, rather than
+  falling through to unrestricted. Genuinely-unconfigured clients (RICO) stay
+  unrestricted.

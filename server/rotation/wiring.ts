@@ -404,12 +404,19 @@ export interface SupersededRefs {
 
 /**
  * SECURITY (F1): derive the superseded credential's revoke target from TRUSTED
- * server state, never from the request. The prior COMPLETED rotation job for
- * THIS secret recorded the provider handle + vault ref it published; those are
+ * server state, never from the request. The prior PUBLISHED rotation job for
+ * THIS secret recorded the provider handle + vault ref it made live; that is
  * exactly what the next rotation supersedes. A caller can therefore never point
  * the revoke (a provider-side DELETE) at an unrelated credential id.
  *
- * If no prior completed job exists, this is a first issuance through the engine
+ * "Published" spans `done`, `old-revoked`, and `reconcile-required` (any job
+ * past alias-moved), newest-first -- NOT merely the newest `done` job. A prior
+ * rotation that published but then failed its revoke sits in
+ * `reconcile-required`, and ITS handle is the actually-live stale credential;
+ * selecting an older `done` job would revoke an already-dead handle and leave
+ * the real one un-revoked (F1 stale-job fix).
+ *
+ * If no prior published job exists, this is a first issuance through the engine
  * and there is nothing to revoke -- the caller MUST NOT be able to supply a
  * handle to fill that gap.
  */
@@ -418,7 +425,7 @@ export function resolveSupersededRefs(
   secret: string,
 ): SupersededRefs {
   const store = new RotationStore(rotationDb);
-  const last = store.getLastCompletedJob(secret);
+  const last = store.getLastPublishedJob(secret);
   if (!last || !last.newProviderRef) {
     // No trusted prior credential for this secret -> first issuance.
     return { oldProviderRef: null, oldPayloadRef: null, firstIssuance: true };

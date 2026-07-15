@@ -266,17 +266,26 @@ export class RotationStore {
   }
 
   /**
-   * The most-recent COMPLETED ('done') rotation job for a secret, or null. Used
-   * to derive the superseded credential's TRUSTED provider handle / payload ref
-   * server-side (its new_provider_ref / new_payload_ref are the credential this
-   * next rotation supersedes) -- so a revoke target is never taken from a
-   * request parameter. Identifiers only; no material.
+   * The most-recent PUBLISHED rotation job for a secret whose provider handle
+   * is recorded, or null. "Published" means the job moved the alias to its new
+   * version, i.e. stage is past `alias-moved`: `done`, `old-revoked`, or
+   * `reconcile-required`. Used to derive the superseded credential's TRUSTED
+   * provider handle / payload ref server-side -- so a revoke target is never
+   * taken from a request parameter. Identifiers only; no material.
+   *
+   * Selecting the newest PUBLISHED job (not merely the newest `done` one) is a
+   * correctness fix (F1): a rotation that published then failed its revoke ends
+   * in `reconcile-required`, and ITS new_provider_ref is the actually-live
+   * superseded credential. Picking an older `done` job would revoke an
+   * already-dead handle and leave the real stale credential un-revoked.
    */
-  getLastCompletedJob(secret: string): JobRow | null {
+  getLastPublishedJob(secret: string): JobRow | null {
     const r = this.db
       .query(
         `SELECT * FROM rotation_jobs
-         WHERE secret = ? AND stage = 'done'
+         WHERE secret = ?
+           AND stage IN ('done','old-revoked','reconcile-required')
+           AND new_provider_ref IS NOT NULL
          ORDER BY updated_at DESC, created_at DESC
          LIMIT 1`,
       )

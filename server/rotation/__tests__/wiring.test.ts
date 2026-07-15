@@ -19,6 +19,7 @@ import {
   type BwSession,
 } from "../wiring";
 import { TestConnector } from "../connectors/test-connector";
+import { RotationStore } from "../store-sqlite";
 
 function makeStore(): ControlPlaneStore {
   const root = process.env.VW_TEST_TMPDIR ?? tmpdir();
@@ -536,12 +537,15 @@ describe("buildRotationEngine — end-to-end against real control-plane store", 
     rotationDb.close();
   });
 
-  test("F3: every PRE-terminal stage's audit+outbox is durably committed", async () => {
-    // At-least-once holds for pre-terminal stages: each stage's audit ledger
-    // row and outbox event is committed to the control-plane DB as the engine
-    // advances, so a crash before 'done' still leaves every prior stage
-    // durable. (Terminal 'done' emission is best-effort -- see the bound
-    // documented in docs/pilot-cutover.md.)
+  test("F3: on the delivered happy path every PRE-terminal stage emits audit+outbox", async () => {
+    // On a fully-delivered rotation (no mid-flight crash), each pre-terminal
+    // stage's audit ledger row and outbox event is present in the control-plane
+    // DB. This is an emission check, NOT a crash-durability guarantee: the emit
+    // is a separate transaction after the fenced stage checkpoint, so a crash in
+    // between drops that stage's row (self-healing for non-terminal stages via
+    // resumePending; permanently absent for terminal 'done'). The durable record
+    // is the fenced STAGE checkpoint, not the audit/outbox row -- see the bound
+    // in docs/pilot-cutover.md.
     const store = makeStore();
     store.createSecret({ name: "pilot" });
     const ps = new InMemoryPolicyStore();
@@ -682,6 +686,162 @@ describe("resolveSupersededRefs — server-side revoke-target derivation (F1)", 
       oldPayloadRef: null,
       firstIssuance: true,
     });
+    store.close();
+    rotationDb.close();
+  });
+
+  test("F1 stale-job: picks the newest PUBLISHED job (reconcile-required over older done)", () => {
+    // An OLDER rotation completed (`done`, prov-old). A NEWER rotation published
+    // (moved the alias) then FAILED its revoke, landing in `reconcile-required`
+    // with prov-new -- prov-new is the actually-live stale credential. The
+    // revoke target MUST be prov-new, not the already-dead prov-old.
+    const rotationDb = new Database(":memory:");
+    const store = new RotationStore(rotationDb);
+
+    // Older job -> done, provider prov-old.
+    store.insertJob(
+      {
+        id: "job-old",
+        secret: "svc",
+        connector: "test",
+        strategy: "dual",
+        subject: "mcp",
+        idempotencyKey: "k-old",
+        consumers: [],
+        alias: "current",
+      },
+      1000,
+    );
+    store.updateJob(
+      "job-old",
+      { stage: "done", newProviderRef: "prov-old", newPayloadRef: "vw:old" },
+      1001,
+      null,
+    );
+
+    // Newer job -> reconcile-required, provider prov-new (published, revoke failed).
+    store.insertJob(
+      {
+        id: "job-new",
+        secret: "svc",
+        connector: "test",
+        strategy: "dual",
+        subject: "mcp",
+        idempotencyKey: "k-new",
+        consumers: [],
+        alias: "current",
+      },
+      2000,
+    );
+    store.updateJob(
+      "job-new",
+      {
+        stage: "reconcile-required",
+        newProviderRef: "prov-new",
+        newPayloadRef: "vw:new",
+      },
+      2001,
+      null,
+    );
+
+    const refs = resolveSupersededRefs(rotationDb, "svc");
+    expect(refs).toEqual({
+      oldProviderRef: "prov-new",
+      oldPayloadRef: "vw:new",
+      firstIssuance: false,
+    });
+    rotationDb.close();
+  });
+
+  test("F1: a job that never published (failed pre-alias) is NOT a revoke target", () => {
+    // A `failed` (pre-publish) job never moved the alias -> its handle is not a
+    // live superseded credential. Only PUBLISHED stages count.
+    const rotationDb = new Database(":memory:");
+    const store = new RotationStore(rotationDb);
+    store.insertJob(
+      {
+        id: "job-failed",
+        secret: "svc",
+        connector: "test",
+        strategy: "dual",
+        subject: "mcp",
+        idempotencyKey: "k-f",
+        consumers: [],
+        alias: "current",
+      },
+      1000,
+    );
+    store.updateJob(
+      "job-failed",
+      { stage: "failed", newProviderRef: "prov-failed" },
+      1001,
+      null,
+    );
+    expect(resolveSupersededRefs(rotationDb, "svc")).toEqual({
+      oldProviderRef: null,
+      oldPayloadRef: null,
+      firstIssuance: true,
+    });
+    rotationDb.close();
+  });
+});
+
+describe("resolveSupersededRefs — idempotency scoping is per-secret (F1)", () => {
+  test("two secrets with the same caller key get independent jobs", async () => {
+    // The MCP tool namespaces the caller key by credential (`<cred>\x1f<key>`).
+    // Model that here: two secrets, SAME caller key, distinct scoped keys ->
+    // two independent jobs, each rotating its OWN secret.
+    const store = makeStore();
+    store.createSecret({ name: "secretA" });
+    store.createSecret({ name: "secretB" });
+    const ps = new InMemoryPolicyStore();
+    ps.setPolicy({
+      subject: "mcp",
+      resourcePattern: "*",
+      actions: ["rotate", "alias.move", "rotate.revoke"] as never,
+      effect: "allow",
+    });
+    const authz = new AuthorizationEngine(ps);
+    const rotationDb = new Database(":memory:");
+    let seq = 0;
+    const engine = () =>
+      buildRotationEngine(rotationDb, {
+        store,
+        authz,
+        connector: new TestConnector({ material: `M${++seq}-do-not-leak-xxx` }),
+        vault: new VaultWriterAdapter(
+          async () => ({ session: "s", folderId: "f" }),
+          async () => ({ id: `i${seq}` }),
+        ),
+        consumerAllowlist: {},
+        consumerReloader: new SystemdConsumerReloader(async () => {}),
+      });
+
+    const US = String.fromCharCode(0x1f);
+    const callerKey = "same-request-id";
+    const rA = await engine().rotate({
+      credential: "secretA",
+      connector: "test",
+      strategy: "single",
+      consumers: [],
+      idempotencyKey: `secretA${US}${callerKey}`,
+      subject: "mcp",
+    });
+    const rB = await engine().rotate({
+      credential: "secretB",
+      connector: "test",
+      strategy: "single",
+      consumers: [],
+      idempotencyKey: `secretB${US}${callerKey}`,
+      subject: "mcp",
+    });
+
+    // Independent jobs for independent secrets.
+    expect(rA.jobId).not.toBe(rB.jobId);
+    expect(rA.secret).toBe("secretA");
+    expect(rB.secret).toBe("secretB");
+    expect(rA.stage).toBe("done");
+    expect(rB.stage).toBe("done");
     store.close();
     rotationDb.close();
   });

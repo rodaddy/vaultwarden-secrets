@@ -23,10 +23,22 @@ export class FolderScope {
   /** Raw config: clientId → folder names */
   private clientFolderNames: Map<string, string[]>;
 
+  /**
+   * Scope keys of clients that are CONFIGURED as restricted (an
+   * API_FOLDERS_<CLIENT> entry exists), independent of whether their folders
+   * resolved in the vault. Used to fail CLOSED (F4): a configured-restricted
+   * client whose folders don't resolve — or a not-yet-initialized scope — must
+   * deny, never fall through to unrestricted.
+   */
+  private configuredRestricted: Set<string>;
+
   private initialized = false;
 
   constructor(clientFolderNames: Map<string, string[]>) {
     this.clientFolderNames = clientFolderNames;
+    this.configuredRestricted = new Set(
+      [...clientFolderNames.keys()].map((k) => this.scopeKey(k)),
+    );
   }
 
   /**
@@ -136,45 +148,67 @@ export class FolderScope {
    * scope and stays unrestricted.
    */
   private scopeKey(clientId: string): string {
-    const stripped = clientId.startsWith("legacy:")
-      ? clientId.slice("legacy:".length)
-      : clientId;
+    // Strip the `legacy:` prefix defensively — repeatedly — so a malformed
+    // subject like `legacy:legacy:x` cannot key differently from `x` (F4 P2).
+    let stripped = clientId;
+    while (stripped.startsWith("legacy:")) {
+      stripped = stripped.slice("legacy:".length);
+    }
     return stripped.toLowerCase();
   }
 
-  /** Whether this client has any folder restrictions */
+  /**
+   * Resolve the effective scope decision for a client: whether it is
+   * restricted, and to which folders. Fails CLOSED (F4): a client configured as
+   * restricted whose folders did not resolve — or any lookup before init
+   * completes for a configured-restricted client — is `restricted` with an
+   * EMPTY allow set, denying every item. Only a genuinely-unconfigured client
+   * (no API_FOLDERS_* entry) is unrestricted.
+   */
+  private resolveScope(clientId: string): {
+    restricted: boolean;
+    allowed: Set<string>;
+  } {
+    const key = this.scopeKey(clientId);
+    const configured = this.configuredRestricted.has(key);
+    if (!configured) return { restricted: false, allowed: new Set() };
+    // Configured-restricted: use resolved folders if present, else empty (deny).
+    return {
+      restricted: true,
+      allowed: this.clientAllowedFolderIds.get(key) ?? new Set(),
+    };
+  }
+
+  /**
+   * Whether this client is configured as folder-restricted. This is a property
+   * of configuration (an API_FOLDERS_<CLIENT> entry), NOT of whether the
+   * folders resolved — so it is stable across init state and fail-closed.
+   */
   isRestricted(clientId: string): boolean {
-    if (!this.initialized) return false;
-    return this.clientAllowedFolderIds.has(this.scopeKey(clientId));
+    return this.configuredRestricted.has(this.scopeKey(clientId));
   }
 
   /** Check if a specific item is accessible to a client */
   isAllowed(clientId: string, itemName: string): boolean {
-    if (!this.initialized) return true;
+    const { restricted, allowed } = this.resolveScope(clientId);
+    if (!restricted) return true; // Genuinely-unconfigured client → unrestricted
 
-    const allowedFolders = this.clientAllowedFolderIds.get(
-      this.scopeKey(clientId),
-    );
-    if (!allowedFolders) return true; // Unrestricted client
-
+    // Configured-restricted: allow ONLY items in a resolved allowed folder.
+    // Zero resolved folders (unresolved/failed init) → deny all (fail closed).
     const itemFolderId = this.itemToFolderId.get(itemName);
-    if (!itemFolderId) return false; // Item has no folder or unknown → blocked
-
-    return allowedFolders.has(itemFolderId);
+    if (!itemFolderId) return false; // No folder / unknown item → blocked
+    return allowed.has(itemFolderId);
   }
 
   /** Filter a list of item names to only those accessible to a client */
   filterItems(clientId: string, itemNames: string[]): string[] {
-    if (!this.initialized) return itemNames;
+    const { restricted, allowed } = this.resolveScope(clientId);
+    if (!restricted) return itemNames; // Genuinely-unconfigured client
 
-    const allowedFolders = this.clientAllowedFolderIds.get(
-      this.scopeKey(clientId),
-    );
-    if (!allowedFolders) return itemNames; // Unrestricted client
-
+    // Configured-restricted with zero resolved folders → empty (fail closed).
     return itemNames.filter((name) => {
       const folderId = this.itemToFolderId.get(name);
-      return folderId != null && allowedFolders.has(folderId);
+      return folderId != null && allowed.has(folderId);
     });
   }
 
