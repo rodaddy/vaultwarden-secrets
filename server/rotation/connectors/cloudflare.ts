@@ -26,6 +26,7 @@ import type {
   Connector,
   ConnectorContext,
   ConnectorCreateResult,
+  VaultReader,
   VaultWriter,
 } from "../deps";
 
@@ -59,6 +60,12 @@ export interface CloudflareConnectorConfig {
   vaultRefPrefix?: string;
   /** Injected fetch for testability; defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * Reads the NEW token plaintext back from the vault so verify() can probe AS
+   * that token (calling /user/tokens/verify with it as bearer). Without this,
+   * verify() cannot prove the new credential works and MUST fail closed.
+   */
+  vaultReader?: VaultReader;
 }
 
 /**
@@ -111,7 +118,7 @@ export class CloudflareConnector implements Connector {
   async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
     const oldId = ctx.oldProviderRef;
     let policies: CfTokenPolicy[] | undefined;
-    if (oldId) {
+    if (!ctx.firstIssuance && oldId) {
       const old = await this.call<CfToken>(
         "GET",
         `/user/tokens/${oldId}`,
@@ -119,6 +126,12 @@ export class CloudflareConnector implements Connector {
       );
       policies = old.policies;
     }
+    // Job-scoped idempotency: the token name embeds the jobId. If a crash left a
+    // half-created token from THIS job, a fresh mint would double-create. We
+    // cannot re-read the plaintext of an existing token from Cloudflare (only
+    // returned once at create), so the engine's create-intent + vault check
+    // guards the common case; here we always mint but with a deterministic,
+    // job-scoped name so orphans are attributable and cleanable.
     const name = `rotation-${ctx.secret}-${ctx.jobId}`.slice(0, 120);
     const created = await this.call<CfToken>(
       "POST",
@@ -150,30 +163,43 @@ export class CloudflareConnector implements Connector {
     };
   }
 
-  /** Verify the NEW token by calling the verify endpoint with it as bearer. */
+  /**
+   * Verify the NEW token by probing /user/tokens/verify AS that token (the new
+   * bearer read transiently from the vault). This proves the replacement is
+   * live and usable -- reading metadata with the management token would only
+   * prove it EXISTS, not that it authenticates. Any inability to read or probe
+   * the new token returns false so the engine fails closed (no publish, no
+   * revoke of the old credential).
+   */
   async verify(ctx: ConnectorContext): Promise<boolean> {
-    // The new token id is on ctx.newProviderRef; but verify needs the plaintext
-    // as bearer, which lives only in the vault. The integration wiring reads it
-    // from the vault at probe time. Here we can only verify via the management
-    // token that the new token exists and is active.
-    const newId = ctx.newProviderRef;
-    if (!newId) return false;
+    if (!ctx.newPayloadRef || !this.cfg.vaultReader) return false;
+    let bearer: string | null;
     try {
-      const tok = await this.call<CfToken>(
-        "GET",
-        `/user/tokens/${newId}`,
-        this.cfg.apiToken,
-      );
-      return tok.status === "active";
+      bearer = await this.cfg.vaultReader.readItem(ctx.newPayloadRef);
     } catch {
       return false;
+    }
+    if (!bearer) return false;
+    try {
+      const res = await this.call<{ id: string; status: string }>(
+        "GET",
+        "/user/tokens/verify",
+        bearer, // probe AS the new token
+      );
+      return res.status === "active";
+    } catch {
+      return false;
+    } finally {
+      // Drop the transient bearer reference promptly.
+      bearer = null;
     }
   }
 
   /** Revoke the OLD token after verification passes. */
   async revoke(ctx: ConnectorContext): Promise<void> {
+    if (ctx.firstIssuance) return; // no prior credential to revoke
     const oldId = ctx.oldProviderRef;
-    if (!oldId) return; // nothing to revoke (first issuance)
+    if (!oldId) return; // nothing to revoke
     await this.call<{ id: string }>(
       "DELETE",
       `/user/tokens/${oldId}`,

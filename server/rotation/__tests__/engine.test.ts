@@ -68,6 +68,9 @@ function req(over: Partial<RotateRequest> = {}): RotateRequest {
     consumers: ["caddy", "certbot"],
     idempotencyKey: "req-1",
     subject: "operator",
+    // A prior credential exists (not first issuance) so revoke runs on success.
+    oldProviderRef: "old-prov-ref",
+    oldPayloadRef: "old-ref",
     ...over,
   };
 }
@@ -134,6 +137,23 @@ describe("no-secret-leak guard", () => {
     const h = makeHarness();
     await h.engine.rotate(req());
     assertNoLeak(h);
+  });
+
+  test("payload-bearing error is sanitized before any persistence", async () => {
+    // create() writes material (arms the guard), then verify() throws an error
+    // whose message embeds the sentinel. The engine must sanitize it: the
+    // sentinel must never land in a checkpoint / job row / audit / outbox.
+    const h = makeHarness(
+      { maxAttempts: 1 },
+      { failOn: "verify", failTimes: 99, failWith: SENTINEL },
+    );
+    const receipt = await h.engine.rotate(req());
+    // verify failed -> rolled-back (pre-publish)
+    expect(receipt.stage).toBe("rolled-back");
+    // Every persisted/emitted surface is clean; the checkpoint error was scrubbed.
+    assertNoLeak(h);
+    const cks = h.db.query("SELECT detail FROM rotation_checkpoints").all();
+    expect(JSON.stringify(cks).includes(SENTINEL)).toBe(false);
   });
 });
 
@@ -293,5 +313,58 @@ describe("consumer allowlist", () => {
       h.engine.rotate(req({ consumers: ["caddy", "evil-arbitrary-cmd"] })),
     ).rejects.toThrow(/not allowlisted/);
     expect(h.connector.calls.create).toBe(0);
+  });
+});
+
+describe("first issuance (no old credential)", () => {
+  test("no revoke attempted, reaches done", async () => {
+    const h = makeHarness();
+    const receipt = await h.engine.rotate(
+      req({ oldProviderRef: null, oldPayloadRef: null }),
+    );
+    expect(receipt.stage).toBe("done");
+    // first issuance: nothing to revoke
+    expect(h.connector.revoked).toBe(false);
+    expect(h.connector.calls.revoke).toBe(0);
+    expect(h.store.aliasVersion("Cloudflare - DNS API", "current")).toBe(1);
+  });
+});
+
+describe("rollback authorization", () => {
+  test("rollback denied after pre-publish failure -> reconcile-required", async () => {
+    // verify fails (pre-publish) -> failed -> rollback, but rollback is denied
+    const h = makeHarness(
+      { authorize: denyAuthorize(["rollback"]) },
+      { verifyResult: false },
+    );
+    const receipt = await h.engine.rotate(req());
+    expect(receipt.stage).toBe("reconcile-required");
+    // never revoked old cred; never rolled back the credential
+    expect(h.connector.revoked).toBe(false);
+    expect(h.connector.rolledBack).toBe(false);
+    expect(h.store.reconcile.some((o) => o.op === "rollback")).toBe(true);
+  });
+});
+
+describe("post-publish failure never rolls back", () => {
+  test("revoke transport failure after alias move -> reconcile, no rollback", async () => {
+    const h = makeHarness({}, { failOn: "revoke", failTimes: 99 });
+    const receipt = await h.engine.rotate(req());
+    expect(receipt.stage).toBe("reconcile-required");
+    // alias published
+    expect(h.store.aliasVersion("Cloudflare - DNS API", "current")).toBe(1);
+    // credential rollback (deletion of new token) must NOT have run
+    expect(h.connector.rolledBack).toBe(false);
+    expect(h.store.reconcile.some((o) => o.op === "revoke")).toBe(true);
+  });
+});
+
+describe("maxAttempts validation", () => {
+  test("rejects Infinity / non-integer / non-positive", () => {
+    expect(() => makeHarness({ maxAttempts: Infinity })).toThrow(RangeError);
+    expect(() => makeHarness({ maxAttempts: 0 })).toThrow(RangeError);
+    expect(() => makeHarness({ maxAttempts: -1 })).toThrow(RangeError);
+    expect(() => makeHarness({ maxAttempts: 2.5 })).toThrow(RangeError);
+    expect(() => makeHarness({ maxAttempts: NaN })).toThrow(RangeError);
   });
 });

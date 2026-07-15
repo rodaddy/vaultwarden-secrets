@@ -2,9 +2,13 @@
  * server/rotation/connectors/test-connector.ts
  *
  * Deterministic in-memory connector for offline tests. It generates a fake
- * "secret" internally, writes it through the injected VaultWriter (so the
- * engine only ever sees refs/checksums), and lets each phase be scripted to
+ * "secret" internally, writes it through the injected (arming) VaultWriter (so
+ * the engine only ever sees refs/checksums), and lets each phase be scripted to
  * fail for failure-injection tests.
+ *
+ * create() is JOB-SCOPED IDEMPOTENT: called twice for the same jobId it returns
+ * the same providerRef/payloadRef and does not double-write, modelling a
+ * crash-safe provider that reuses the existing credential.
  *
  * The generated material is exposed via `lastGenerated` ONLY so a test can arm
  * the leak guard / assert the sentinel never surfaces in persisted state. The
@@ -26,6 +30,11 @@ export interface TestConnectorOptions {
   failOn?: "create" | "verify" | "revoke" | "rollback";
   /** Fail `failOn` only for the first N calls, then succeed (retry tests). */
   failTimes?: number;
+  /**
+   * When set, the injected failure error MESSAGE embeds this string. Used to
+   * prove the leak guard sanitizes payload-bearing errors (pass the sentinel).
+   */
+  failWith?: string;
 }
 
 export class TestConnector implements Connector {
@@ -43,6 +52,9 @@ export class TestConnector implements Connector {
   private verifyResult: boolean;
   private failOn?: string;
   private failTimes: number;
+  private failWith?: string;
+  /** jobId -> prior create result (job-scoped idempotency). */
+  private created = new Map<string, ConnectorCreateResult>();
 
   constructor(opts: TestConnectorOptions = {}) {
     this.material =
@@ -50,28 +62,35 @@ export class TestConnector implements Connector {
     this.verifyResult = opts.verifyResult ?? true;
     this.failOn = opts.failOn;
     this.failTimes = opts.failTimes ?? Number.MAX_SAFE_INTEGER;
+    this.failWith = opts.failWith;
   }
 
   private maybeFail(phase: string): void {
     if (this.failOn === phase && this.calls[phase]! <= this.failTimes) {
-      throw new Error(`injected ${phase} failure`);
+      const suffix = this.failWith ? ` [${this.failWith}]` : "";
+      throw new Error(`injected ${phase} failure${suffix}`);
     }
   }
 
   async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
     this.calls.create!++;
     this.maybeFail("create");
+    // Job-scoped idempotency: reuse the prior result for the same job.
+    const prior = this.created.get(ctx.jobId);
+    if (prior) return prior;
     this.lastGenerated = this.material;
-    // Material crosses ONLY into the vault writer, never back to the engine.
+    // Material crosses ONLY into the (arming) vault writer, never to the engine.
     const written = await ctx.vault.writeItem(
-      `${ctx.secret}#pending`,
+      `${ctx.secret}#${ctx.jobId}`,
       () => this.material,
     );
-    return {
+    const result: ConnectorCreateResult = {
       payloadRef: written.payloadRef,
       checksum: written.checksum,
       providerRef: `prov-${ctx.jobId}`,
     };
+    this.created.set(ctx.jobId, result);
+    return result;
   }
 
   async verify(ctx: ConnectorContext): Promise<boolean> {

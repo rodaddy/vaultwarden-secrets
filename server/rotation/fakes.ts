@@ -24,6 +24,7 @@ import type {
   Outbox,
   OutboxEvent,
   ReconcileOp,
+  VaultReader,
   VaultWriteResult,
   VaultWriter,
   VersionRecord,
@@ -34,10 +35,10 @@ import type {
 } from "./deps";
 
 // ---------------------------------------------------------------------------
-// Vault writer (holds material; hands out refs + checksums only)
+// Vault writer/reader (holds material; hands out refs + checksums only)
 // ---------------------------------------------------------------------------
 
-export class InMemoryVaultWriter implements VaultWriter {
+export class InMemoryVaultWriter implements VaultWriter, VaultReader {
   /** ref -> stored material. Test-only accessor to prove non-leakage. */
   readonly stored = new Map<string, string>();
   private seq = 0;
@@ -52,6 +53,11 @@ export class InMemoryVaultWriter implements VaultWriter {
     const checksum =
       "sha256:" + createHash("sha256").update(material).digest("hex");
     return { payloadRef, checksum };
+  }
+
+  /** Read material back for a probe (verify). Transient use only. */
+  async readItem(payloadRef: string): Promise<string | null> {
+    return this.stored.get(payloadRef) ?? null;
   }
 }
 

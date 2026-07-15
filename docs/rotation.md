@@ -13,20 +13,40 @@ safely and leaves a recoverable state.
 
 - **No payloads in engine state.** Generated material never enters job rows,
   checkpoints, receipts, audit entries, outbox events, or errors. Connectors
-  write material through an injected `VaultWriter` and hand back only a
-  `payloadRef` + `checksum`. A `LeakGuard` scans every persisted/emitted value
-  and throws `SecretLeakError` (fail closed) if a sentinel would leak.
-- **Fail-closed authorization.** `rotate`, `move-alias`, and `revoke` are each
-  authorized via the injected `Authorize` dep before their effect runs.
-- **Old credential survives failed verification.** `revoke()` runs only after
-  `verify()` passes AND the alias has moved.
-- **Serialized per credential.** A lease (owner + expiry) prevents concurrent
-  rotation of the same credential; duplicate `idempotencyKey` returns the
-  existing job.
+  write material through an ARMING `VaultWriter` proxy that registers each
+  written value with a job-scoped `LeakGuard`; the guard stays armed for every
+  later stage, scans every persisted/emitted value AND sanitizes stage errors,
+  and throws `SecretLeakError` (fail closed) if a value would leak.
+- **Fail-closed authorization.** `rotate`, `move-alias`, `revoke`, AND
+  `rollback` are each authorized via the injected `Authorize` dep before their
+  effect runs. A denied `revoke`/`rollback` after publish escalates to
+  `reconcile-required` (never a silent skip).
+- **Old credential survives failed verification.** `verify()` probes AS the new
+  credential (never the management credential); inability to probe returns
+  `false` and fails closed. `revoke()` runs only after `verify()` passes AND the
+  alias has moved. First issuance (no prior credential) skips revoke entirely.
+- **Serialized per credential (fenced lease).** The lease is acquired with a
+  SINGLE atomic conditional write, owned by a PER-EXECUTION uuid (not the job
+  id, so two resume runs can't collude as one owner), and carries a monotonic
+  fencing token. The lease is revalidated/renewed around every awaited effect;
+  every persisted write is fenced, so an executor that lost the lease aborts
+  before mutating. Duplicate `idempotencyKey` returns the existing job.
+- **Crash-safe creation.** A durable creation-intent is set BEFORE the
+  connector/vault create call; connectors are job-scoped-idempotent, so a crash
+  between create and its checkpoint reuses the existing credential instead of
+  minting a second one.
+- **Never rollback after publish.** Once the alias may point at the new version,
+  any failure fails closed to `reconcile-required`. Rollback (credential
+  deletion) is only reachable on a pre-publish failure. On resume, an alias
+  already at the target advances to `done` (never re-rolls-back a completed
+  move). Rollback is effect-pending: a crash mid-rollback resumes rollback.
 - **No stale alias.** The alias move is CAS-guarded (`expectedFromVersion`); a
   retry against a drifted alias is rejected.
 - **Allowlist-only consumer hooks.** Consumers map to a declared systemd unit or
-  fixed command template. Caller-supplied commands are never accepted.
+  fixed command template. Caller-supplied commands are never accepted. Reloads
+  are checkpointed per-consumer so a resume replays only the not-yet-reloaded.
+- **Bounded retries.** `maxAttempts` must be a positive integer (Infinity /
+  non-integer / non-positive are rejected at construction).
 
 ## State machine
 
@@ -43,15 +63,15 @@ stateDiagram-v2
     consumers_reloaded --> failed : verify == false (old cred intact)
     verified --> alias_moved : CAS-guarded moveAlias (authz: move-alias)
     verified --> failed
-    alias_moved --> old_revoked : connector.revoke (authz: revoke)
-    alias_moved --> reconcile_required : partial cross-store outcome
+    alias_moved --> old_revoked : connector.revoke (authz: revoke); first-issuance skips
+    alias_moved --> reconcile_required : ANY post-publish failure (never rollback)
     old_revoked --> done
     old_revoked --> reconcile_required : revoke partial
 
-    failed --> rolling_back : connector.rollback (bounded)
-    failed --> reconcile_required
-    rolling_back --> rolled_back
-    rolling_back --> reconcile_required : rollback could not fully undo
+    failed --> rolling_back : authz: rollback; only reachable PRE-publish
+    failed --> reconcile_required : rollback denied / alias already published
+    rolling_back --> rolled_back : rollback durably complete
+    rolling_back --> reconcile_required : rollback retries exhausted
 
     done --> [*]
     rolled_back --> [*]

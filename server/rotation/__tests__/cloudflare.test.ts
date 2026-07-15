@@ -55,31 +55,62 @@ describe("CloudflareConnector (offline, stubbed fetch)", () => {
     expect([...vault.stored.values()]).toContain(PLAINTEXT);
   });
 
-  test("verify returns true only for active token", async () => {
-    const fetchImpl = (async (url: string) => {
-      if (String(url).includes("/user/tokens/new-id")) {
-        return cfEnvelope({ id: "new-id", name: "n", status: "active" });
-      }
-      return cfEnvelope({ id: "x", name: "n", status: "disabled" });
-    }) as unknown as typeof fetch;
-    const conn = new CloudflareConnector({ apiToken: "m", fetchImpl });
+  test("verify probes /user/tokens/verify AS the new token (bearer from vault)", async () => {
+    const NEW_TOKEN = "cf-new-token-plaintext-abcdef0123456789-secret";
     const vault = new InMemoryVaultWriter();
-    const okCtx: ConnectorContext = {
+    const { payloadRef } = await vault.writeItem("ref", () => NEW_TOKEN);
+
+    const seenBearers: string[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string>)?.Authorization;
+      seenBearers.push(auth ?? "");
+      if (String(url).endsWith("/user/tokens/verify")) {
+        // Only "active" when probed AS the new token bearer.
+        const isNew = auth === `Bearer ${NEW_TOKEN}`;
+        return cfEnvelope({
+          id: "new-id",
+          status: isNew ? "active" : "disabled",
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as unknown as typeof fetch;
+
+    const conn = new CloudflareConnector({
+      apiToken: "mgmt-token",
+      fetchImpl,
+      vaultReader: vault,
+    });
+    const ctx: ConnectorContext = {
       jobId: "j",
       secret: "s",
       strategy: "dual",
       newProviderRef: "new-id",
+      newPayloadRef: payloadRef,
       vault,
     };
-    expect(await conn.verify(okCtx)).toBe(true);
-    const badCtx: ConnectorContext = {
-      jobId: "j",
-      secret: "s",
-      strategy: "dual",
-      newProviderRef: "other",
-      vault,
-    };
-    expect(await conn.verify(badCtx)).toBe(false);
+    expect(await conn.verify(ctx)).toBe(true);
+    // Proved it probed as the NEW token, not the management token.
+    expect(seenBearers).toContain(`Bearer ${NEW_TOKEN}`);
+    expect(seenBearers).not.toContain("Bearer mgmt-token");
+  });
+
+  test("verify fails closed when the new token cannot be read", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("should not be called");
+    }) as unknown as typeof fetch;
+    // No vaultReader -> cannot probe as the new token -> false.
+    const conn = new CloudflareConnector({ apiToken: "m", fetchImpl });
+    const vault = new InMemoryVaultWriter();
+    expect(
+      await conn.verify({
+        jobId: "j",
+        secret: "s",
+        strategy: "dual",
+        newProviderRef: "new-id",
+        newPayloadRef: "missing",
+        vault,
+      }),
+    ).toBe(false);
   });
 
   test("revoke deletes old token id", async () => {

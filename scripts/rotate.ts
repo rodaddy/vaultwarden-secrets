@@ -19,6 +19,11 @@
  * prevent accidental live rotation).
  *
  * NOTE: no secret values are ever accepted as arguments, printed, or logged.
+ * Errors surfaced to stderr are either pre-flight failures (authorization,
+ * allowlist, validation -- which never carry material) or stage errors that the
+ * engine has already run through its LeakGuard sanitizer, so a generated
+ * payload cannot reach this catch. The receipt printed on success is redacted
+ * (identifiers + checksums only).
  */
 
 import { Database } from "bun:sqlite";

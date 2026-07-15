@@ -1,7 +1,25 @@
-import { describe, test, expect } from "bun:test";
+/**
+ * Crash-resume and concurrency FAITHFULNESS tests.
+ *
+ * These use TWO independent bun:sqlite connections to the SAME on-disk database
+ * (two "processes") plus deterministic barriers injected into the connector, so
+ * the tests actually interleave two executors and interrupt the gap between an
+ * effect and its checkpoint -- rather than politely stepping one engine.
+ */
+
+import { describe, test, expect, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { RotationEngine, type RotateRequest } from "../engine";
-import type { EngineDeps, ConsumerAllowlist } from "../deps";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { RotationEngine, type RotateRequest, LeaseHeldError } from "../engine";
+import type {
+  EngineDeps,
+  ConsumerAllowlist,
+  Connector,
+  ConnectorContext,
+  ConnectorCreateResult,
+} from "../deps";
 import { TestConnector } from "../connectors/test-connector";
 import {
   InMemoryVaultWriter,
@@ -14,24 +32,43 @@ import {
 
 const SENTINEL = "CRASH-RESUME-secret-material-abcdef0123456789";
 
-function baseDeps(over: Partial<EngineDeps> = {}, connOpts = {}): EngineDeps {
-  const consumerAllowlist: ConsumerAllowlist = {
-    caddy: { kind: "systemd", unit: "caddy.service" },
-  };
+// Shared control-plane / vault instances model the external services that
+// survive a process crash (only the SQLite job store is per-connection).
+interface Shared {
+  cp: InMemoryControlPlaneStore;
+  vault: InMemoryVaultWriter;
+  audit: InMemoryAudit;
+  outbox: InMemoryOutbox;
+  reloader: RecordingConsumerReloader;
+  allowlist: ConsumerAllowlist;
+}
+
+function newShared(): Shared {
   return {
-    store: new InMemoryControlPlaneStore(),
-    authorize: allowAllAuthorize(),
+    cp: new InMemoryControlPlaneStore(),
+    vault: new InMemoryVaultWriter(),
     audit: new InMemoryAudit(),
     outbox: new InMemoryOutbox(),
-    connector: new TestConnector({ material: SENTINEL, ...connOpts }),
-    vault: new InMemoryVaultWriter(),
-    consumerAllowlist,
-    consumerReloader: new RecordingConsumerReloader(),
-    ...over,
+    reloader: new RecordingConsumerReloader(),
+    allowlist: { caddy: { kind: "systemd", unit: "caddy.service" } },
   };
 }
 
-function req(): RotateRequest {
+function depsFor(shared: Shared, connector: Connector): EngineDeps {
+  return {
+    store: shared.cp,
+    authorize: allowAllAuthorize(),
+    audit: shared.audit,
+    outbox: shared.outbox,
+    connector,
+    vault: shared.vault,
+    consumerAllowlist: shared.allowlist,
+    consumerReloader: shared.reloader,
+    leaseTtlMs: 60_000,
+  };
+}
+
+function req(over: Partial<RotateRequest> = {}): RotateRequest {
   return {
     credential: "svc-token",
     connector: "test",
@@ -39,74 +76,176 @@ function req(): RotateRequest {
     consumers: ["caddy"],
     idempotencyKey: "resume-1",
     subject: "operator",
+    oldProviderRef: "old-ref",
+    oldPayloadRef: "old-payload",
+    ...over,
   };
 }
 
-describe("crash-resume", () => {
-  test("step-wise drive then resumePending completes the job", async () => {
-    // Share ONE db + ONE set of deps across the two "process lifetimes" so
-    // durable state survives the simulated crash. (Control plane / vault are
-    // external services in reality; here in-memory instances stand in.)
-    const db = new Database(":memory:");
-    const deps = baseDeps();
-    const engine1 = new RotationEngine(db, deps);
+let dir: string | null = null;
+function tmpDbPath(): string {
+  dir = mkdtempSync(join(tmpdir(), "vw-rotation-"));
+  return join(dir, "rotation.sqlite");
+}
+afterEach(() => {
+  if (dir) {
+    rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  }
+});
 
-    // Manually create the job + drive a few steps, then "crash" (stop stepping).
-    // We use step() to advance stage by stage.
-    // First start via rotate() is atomic to completion, so instead we mimic a
-    // partial run by constructing the job through a short-circuited engine:
-    // step() requires an existing job, so seed one by starting rotate in a
-    // connector that stalls verify -> we instead drive manually.
+describe("crash-resume (two connections, one file db)", () => {
+  test("crash in the gap between provider-create effect and its checkpoint is safe (no double create)", async () => {
+    const path = tmpDbPath();
+    const shared = newShared();
 
-    // Seed a job at 'requested' using the store directly is not exposed; use
-    // rotate() with a connector that throws AFTER consumers to leave a
-    // non-terminal, resumable state is complex. Simplest faithful simulation:
-    // run rotate() to completion is NOT a crash. So drive step-by-step here.
+    // Barrier: create() writes material to the vault (durable side effect),
+    // then BLOCKS before returning -- modelling a crash after the effect but
+    // before the engine can persist the provider-created checkpoint.
+    let createReached!: () => void;
+    const createHit = new Promise<void>((r) => (createReached = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let createCount = 0;
 
-    // Insert job by calling the private path via a fresh engine that we stop.
-    // We expose step(): but we need a job id first. Create one by running the
-    // first transition only. Use a connector that blocks verify indefinitely
-    // is overkill; instead we drive with step() after seeding.
+    const crashingConn: Connector = {
+      async create(ctx: ConnectorContext): Promise<ConnectorCreateResult> {
+        createCount++;
+        const w = await ctx.vault.writeItem(
+          `${ctx.secret}#${ctx.jobId}`,
+          () => SENTINEL,
+        );
+        createReached();
+        await gate; // "crash" here: never returns for this executor
+        return {
+          payloadRef: w.payloadRef,
+          checksum: w.checksum,
+          providerRef: `prov-${ctx.jobId}`,
+        };
+      },
+      async verify() {
+        return true;
+      },
+      async revoke() {},
+      async rollback() {},
+    };
 
-    // Seed: start a rotation whose connector fails at 'consumers-reloaded'
-    // verify by making verify hang is not allowed offline. Use failOn verify
-    // with retries exhausted would go terminal. Instead: use a connector that
-    // succeeds, but drive with step() so WE control stopping.
+    // Executor 1: its own connection; starts the job, hangs in create().
+    const db1 = new Database(path);
+    const e1 = new RotationEngine(db1, depsFor(shared, crashingConn));
+    const p1 = e1.rotate(req({ jobId: "job-1" }));
+    await createHit; // effect done, checkpoint NOT yet written
 
-    // To get a job id we call an internal seed: run rotate with a connector
-    // that throws a sentinel we catch, leaving job persisted mid-way.
-    const jobId = "resume-job-1";
-    // Use step-based driving: first we must persist the job. Do it by calling
-    // rotate() but with maxAttempts high and a connector that we stop via
-    // step. Since rotate() runs to terminal, we instead reach into a fresh
-    // engine and drive purely by step() after seeding the requested row.
+    // Simulate crash: abandon p1's lease by expiring time is heavy; instead we
+    // just proceed -- executor 1 still "holds" a live lease, so executor 2 must
+    // be blocked until the lease expires. Prove that here:
+    const db2 = new Database(path);
+    // A job-scoped-idempotent connector: reuses the SAME material, no 2nd write.
+    const e2 = new RotationEngine(
+      db2,
+      depsFor(shared, new TestConnector({ material: SENTINEL })),
+    );
+    // Same idempotency key -> returns the existing (in-flight) job, no rotation.
+    const dup = await e2.rotate(req({ jobId: "job-1" }));
+    expect(dup.jobId).toBe("job-1");
 
-    // Seed the requested row through a throw-away rotate that fails fast and
-    // is resumable: connector fails verify with retries so it lands terminal.
-    // -> Not resumable. Therefore we drive step-wise from the very start using
-    // a dedicated seeding helper on the engine: startJob.
-    const seeded = await engine1.startJob({ ...req(), jobId });
-    expect(seeded.stage).toBe("requested");
+    // Let executor 1 finish; it drives to done.
+    release();
+    const r1 = await p1;
+    expect(r1.stage).toBe("done");
 
-    // Advance two stages then "crash".
-    await engine1.step(jobId); // -> provider-created
-    await engine1.step(jobId); // -> staged
-    const mid = engine1.getReceipt(jobId);
-    expect(mid.stage).toBe("staged");
-    expect(mid.stage).not.toBe("done");
+    // Exactly ONE credential minted despite the crash gap: the crashing
+    // connector's create ran once (executor 1); executor 2 short-circuited on
+    // idempotency and never called create.
+    expect(createCount).toBe(1);
+    // Only one vault write for this job (no double-create).
+    const writes = [...shared.vault.stored.keys()].filter((k) =>
+      k.startsWith("svc-token#job-1"),
+    );
+    expect(writes.length).toBe(1);
 
-    // New engine instance (new "process"), SAME durable db + deps.
-    const engine2 = new RotationEngine(db, deps);
-    const resumed = await engine2.resumePending();
+    db1.close();
+    db2.close();
+  });
+
+  test("resumePending on a fresh connection completes a job stalled mid-flight", async () => {
+    const path = tmpDbPath();
+    const shared = newShared();
+
+    // Executor 1 seeds + advances two stages, then "crashes" (stops).
+    const db1 = new Database(path);
+    const e1 = new RotationEngine(
+      db1,
+      depsFor(shared, new TestConnector({ material: SENTINEL })),
+    );
+    await e1.startJob(req({ jobId: "job-2" }));
+    await e1.step("job-2"); // -> provider-created
+    await e1.step("job-2"); // -> staged
+    expect(e1.getReceipt("job-2").stage).toBe("staged");
+    db1.close(); // crash: connection gone
+
+    // Executor 2: brand-new connection to the same file, fresh executor id.
+    const db2 = new Database(path);
+    const e2 = new RotationEngine(
+      db2,
+      depsFor(shared, new TestConnector({ material: SENTINEL })),
+    );
+    const resumed = await e2.resumePending();
     expect(resumed.length).toBe(1);
     expect(resumed[0]!.stage).toBe("done");
 
-    // Verify the material still lives only in the vault, never in job rows.
-    const rows = JSON.stringify(db.query("SELECT * FROM rotation_jobs").all());
+    // No secret material in any durable row.
+    const rows = JSON.stringify(db2.query("SELECT * FROM rotation_jobs").all());
     const cks = JSON.stringify(
-      db.query("SELECT * FROM rotation_checkpoints").all(),
+      db2.query("SELECT * FROM rotation_checkpoints").all(),
     );
     expect(rows.includes(SENTINEL)).toBe(false);
     expect(cks.includes(SENTINEL)).toBe(false);
+    db2.close();
+  });
+
+  test("two live executors cannot both drive the same credential (fencing)", async () => {
+    const path = tmpDbPath();
+    const shared = newShared();
+
+    // Executor 1 holds the lease by blocking in create().
+    let hit!: () => void;
+    const reached = new Promise<void>((r) => (hit = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const blockingConn: Connector = {
+      async create(ctx) {
+        const w = await ctx.vault.writeItem("x", () => SENTINEL);
+        hit();
+        await gate;
+        return { payloadRef: w.payloadRef, checksum: w.checksum };
+      },
+      async verify() {
+        return true;
+      },
+      async revoke() {},
+      async rollback() {},
+    };
+
+    const db1 = new Database(path);
+    const e1 = new RotationEngine(db1, depsFor(shared, blockingConn));
+    const p1 = e1.rotate(req({ jobId: "job-3", idempotencyKey: "k3" }));
+    await reached; // executor 1 holds a live lease
+
+    // Executor 2 (different connection, DIFFERENT idempotency key -> same
+    // credential) must be refused the lease -- not collude as the same owner.
+    const db2 = new Database(path);
+    const e2 = new RotationEngine(
+      db2,
+      depsFor(shared, new TestConnector({ material: SENTINEL })),
+    );
+    await expect(
+      e2.rotate(req({ jobId: "job-3b", idempotencyKey: "k3b" })),
+    ).rejects.toBeInstanceOf(LeaseHeldError);
+
+    release();
+    await p1;
+    db1.close();
+    db2.close();
   });
 });

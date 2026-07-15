@@ -169,6 +169,17 @@ export interface ConnectorContext {
   newProviderRef?: string;
   /** Provider-side handle for the old credential to revoke. */
   oldProviderRef?: string;
+  /**
+   * True when there is no prior credential to revoke (first issuance). The
+   * connector must not attempt a revoke in this case.
+   */
+  firstIssuance?: boolean;
+  /**
+   * The engine-supplied vault writer. It is an ARMING proxy: any material
+   * passed to writeItem() is registered with the job's LeakGuard so a later
+   * leak into persisted state / audit / receipts is caught. The connector must
+   * route ALL generated material through this writer.
+   */
   vault: VaultWriter;
 }
 
@@ -182,12 +193,28 @@ export interface ConnectorCreateResult {
 export interface Connector {
   /** Create the replacement at the provider + stage material via vault writer. */
   create(ctx: ConnectorContext): Promise<ConnectorCreateResult>;
-  /** Prove the replacement works (provider/consumer probe). */
+  /**
+   * Prove the replacement works by probing AS the new credential (never the
+   * management credential). Inability to read/probe the new credential MUST
+   * return false so the engine fails closed (no publish, no old-cred revoke).
+   */
   verify(ctx: ConnectorContext): Promise<boolean>;
   /** Revoke the superseded provider credential (after verify passes). */
   revoke(ctx: ConnectorContext): Promise<void>;
   /** Bounded rollback of a failed rotation (leaves old credential intact). */
   rollback(ctx: ConnectorContext): Promise<void>;
+}
+
+/**
+ * Optional: a VaultWriter that can also READ material back out for probes
+ * (e.g. verify() needs the new token plaintext as a bearer). Kept distinct
+ * from {@link VaultWriter} so the write-only boundary stays the default; the
+ * connector that needs read-for-probe declares this stronger dependency and
+ * the integration wiring supplies it. Read material is used transiently for a
+ * probe and never returned to the engine.
+ */
+export interface VaultReader {
+  readItem(payloadRef: string): Promise<string | null>;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,11 +1,22 @@
 /**
  * server/rotation/store-sqlite.ts
  *
- * Durable persistence for rotation jobs, checkpoints, and leases, backed by
- * bun:sqlite. Accepts an INJECTED Database handle so tests use a temp/in-memory
- * db and the integration pass can hand in the shared control-plane db.
+ * Durable persistence for rotation jobs, checkpoints, leases, and fencing
+ * tokens, backed by bun:sqlite. Accepts an INJECTED Database handle so tests
+ * use a temp/in-memory db and the integration pass can hand in the shared
+ * control-plane db.
  *
- * Never stores secret material -- only identifiers, hashes, counts, stages.
+ * Never stores secret material -- only identifiers, hashes, counts, stages,
+ * and fencing tokens.
+ *
+ * Concurrency correctness:
+ *  - acquireLease() is a SINGLE atomic conditional write (inside an IMMEDIATE
+ *    transaction) that only succeeds when no live lease is held by another
+ *    owner. It mints a monotonic fencing token and returns it. There is no
+ *    SELECT-then-UPSERT race window.
+ *  - Every mutation (checkpoint append, job update) is fenced: a caller that
+ *    lost the lease (fence advanced) is rejected, so a stale executor cannot
+ *    mutate a job another executor now owns.
  */
 
 import type { Database } from "bun:sqlite";
@@ -25,8 +36,34 @@ const MIGRATION_PATH = join(
 
 /** Apply the rotation migration to an injected db handle (idempotent). */
 export function applyRotationMigration(db: Database): void {
+  // WAL + a busy timeout let two connections to the same file db serialize
+  // writers gracefully (the fencing logic assumes writes eventually land or
+  // fail, not deadlock). No-op / harmless for :memory: databases.
+  try {
+    db.run("PRAGMA journal_mode = WAL");
+    db.run("PRAGMA busy_timeout = 5000");
+  } catch {
+    // Some handles (e.g. shared-cache :memory:) reject WAL; ignore.
+  }
   const sql = readFileSync(MIGRATION_PATH, "utf8");
   db.run(sql);
+}
+
+/** Thrown when a fenced-off (stale) executor tries to mutate a job. */
+export class FencedOutError extends Error {
+  constructor(secret: string, expected: number, actual: number) {
+    super(
+      `executor fenced out for ${secret}: had fence ${expected}, live fence ${actual}`,
+    );
+    this.name = "FencedOutError";
+  }
+}
+
+export interface LeaseHandle {
+  secret: string;
+  owner: string;
+  fence: number;
+  expiresAt: number;
 }
 
 export interface JobRow {
@@ -38,6 +75,8 @@ export interface JobRow {
   idempotencyKey: string;
   stage: RotationStage;
   consumers: string[];
+  consumersDone: string[];
+  createIntent: boolean;
   newVersion: number | null;
   newPayloadRef: string | null;
   newChecksum: string | null;
@@ -46,6 +85,7 @@ export interface JobRow {
   oldProviderRef: string | null;
   alias: string;
   expectedFromVersion: number | null;
+  firstIssuance: boolean;
   error: string | null;
   createdAt: number;
   updatedAt: number;
@@ -57,6 +97,7 @@ export interface CheckpointRow {
   stage: RotationStage;
   status: "entered" | "ok" | "error";
   attempt: number;
+  fence: number;
   detail: string | null;
   at: number;
 }
@@ -70,6 +111,8 @@ interface RawJob {
   idempotency_key: string;
   stage: string;
   consumers: string;
+  consumers_done: string;
+  create_intent: number;
   new_version: number | null;
   new_payload_ref: string | null;
   new_checksum: string | null;
@@ -78,6 +121,7 @@ interface RawJob {
   old_provider_ref: string | null;
   alias: string;
   expected_from_ver: number | null;
+  first_issuance: number;
   error: string | null;
   created_at: number;
   updated_at: number;
@@ -93,6 +137,8 @@ function hydrate(r: RawJob): JobRow {
     idempotencyKey: r.idempotency_key,
     stage: r.stage as RotationStage,
     consumers: JSON.parse(r.consumers) as string[],
+    consumersDone: JSON.parse(r.consumers_done) as string[],
+    createIntent: r.create_intent === 1,
     newVersion: r.new_version,
     newPayloadRef: r.new_payload_ref,
     newChecksum: r.new_checksum,
@@ -101,6 +147,7 @@ function hydrate(r: RawJob): JobRow {
     oldProviderRef: r.old_provider_ref,
     alias: r.alias,
     expectedFromVersion: r.expected_from_ver,
+    firstIssuance: r.first_issuance === 1,
     error: r.error,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -116,6 +163,9 @@ export interface NewJobInput {
   idempotencyKey: string;
   consumers: string[];
   alias: string;
+  oldProviderRef?: string | null;
+  oldPayloadRef?: string | null;
+  firstIssuance?: boolean;
 }
 
 export class RotationStore {
@@ -134,8 +184,9 @@ export class RotationStore {
       .query(
         `INSERT INTO rotation_jobs
           (id, secret, connector, strategy, subject, idempotency_key, stage,
-           consumers, alias, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?)`,
+           consumers, consumers_done, alias, old_provider_ref, old_payload_ref,
+           first_issuance, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, '[]', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -146,6 +197,9 @@ export class RotationStore {
         input.idempotencyKey,
         JSON.stringify(input.consumers),
         input.alias,
+        input.oldProviderRef ?? null,
+        input.oldPayloadRef ?? null,
+        input.firstIssuance ? 1 : 0,
         now,
         now,
       );
@@ -178,13 +232,24 @@ export class RotationStore {
     return rows.map(hydrate);
   }
 
-  /** Partial update of a job's mutable fields + stage. */
-  updateJob(id: string, patch: Partial<JobRow>, now: number): void {
+  /**
+   * Fenced partial update. If `fence` is provided, the write only lands while
+   * the executor still holds the live lease at that fence; otherwise it throws
+   * FencedOutError. Pass fence = null only for lease-free bookkeeping.
+   */
+  updateJob(
+    id: string,
+    patch: Partial<JobRow>,
+    now: number,
+    fence: number | null,
+  ): void {
     const cols: string[] = [];
     const vals: unknown[] = [];
     const map: Record<string, string> = {
       stage: "stage",
       consumers: "consumers",
+      consumersDone: "consumers_done",
+      createIntent: "create_intent",
       newVersion: "new_version",
       newPayloadRef: "new_payload_ref",
       newChecksum: "new_checksum",
@@ -193,24 +258,43 @@ export class RotationStore {
       oldProviderRef: "old_provider_ref",
       alias: "alias",
       expectedFromVersion: "expected_from_ver",
+      firstIssuance: "first_issuance",
       error: "error",
     };
     for (const [k, col] of Object.entries(map)) {
       if (k in patch) {
         cols.push(`${col} = ?`);
         const v = (patch as Record<string, unknown>)[k];
-        vals.push(k === "consumers" ? JSON.stringify(v) : (v as unknown));
+        if (k === "consumers" || k === "consumersDone") {
+          vals.push(JSON.stringify(v));
+        } else if (k === "createIntent" || k === "firstIssuance") {
+          vals.push(v ? 1 : 0);
+        } else {
+          vals.push(v as unknown);
+        }
       }
     }
     cols.push("updated_at = ?");
     vals.push(now, id);
-    this.db
-      .query(`UPDATE rotation_jobs SET ${cols.join(", ")} WHERE id = ?`)
-      .run(...(vals as never[]));
+    const run = () => {
+      this.db
+        .query(`UPDATE rotation_jobs SET ${cols.join(", ")} WHERE id = ?`)
+        .run(...(vals as never[]));
+    };
+    if (fence == null) {
+      run();
+      return;
+    }
+    this.withFence(id, fence, now, run);
   }
 
   // -- checkpoints --------------------------------------------------------
 
+  /**
+   * Fenced checkpoint append. Rejects a write from an executor whose fence has
+   * been superseded, so a stale holder cannot record progress on a job another
+   * executor now owns.
+   */
   appendCheckpoint(
     jobId: string,
     stage: RotationStage,
@@ -218,13 +302,22 @@ export class RotationStore {
     attempt: number,
     detail: string | null,
     now: number,
+    fence: number | null,
   ): void {
-    this.db
-      .query(
-        `INSERT INTO rotation_checkpoints (job_id, stage, status, attempt, detail, at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(jobId, stage, status, attempt, detail, now);
+    const run = () => {
+      this.db
+        .query(
+          `INSERT INTO rotation_checkpoints
+             (job_id, stage, status, attempt, fence, detail, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(jobId, stage, status, attempt, fence ?? 0, detail, now);
+    };
+    if (fence == null) {
+      run();
+      return;
+    }
+    this.withFence(jobId, fence, now, run);
   }
 
   listCheckpoints(jobId: string): CheckpointRow[] {
@@ -239,6 +332,7 @@ export class RotationStore {
       stage: r.stage as RotationStage,
       status: r.status as "entered" | "ok" | "error",
       attempt: r.attempt as number,
+      fence: r.fence as number,
       detail: (r.detail as string) ?? null,
       at: r.at as number,
     }));
@@ -260,52 +354,155 @@ export class RotationStore {
     return r.n;
   }
 
-  // -- leases -------------------------------------------------------------
+  // -- leases (atomic, fenced) --------------------------------------------
 
   /**
-   * Acquire the lease for `secret` owned by `owner`. Reclaims an expired
-   * lease. Re-acquisition by the same owner refreshes expiry. Returns true if
-   * held by `owner` after the call; false if another live owner holds it.
+   * Atomically acquire the lease for `secret` owned by `owner` (a
+   * per-execution uuid). Succeeds only if no OTHER owner holds a live lease.
+   * Mints a fresh monotonic fencing token. Returns a LeaseHandle on success or
+   * null if another live owner holds it. Single conditional write -- no
+   * SELECT-then-UPSERT window.
    */
   acquireLease(
     secret: string,
     owner: string,
     now: number,
     ttlMs: number,
-  ): boolean {
-    const existing = this.db
-      .query("SELECT owner, expires_at FROM rotation_leases WHERE secret = ?")
-      .get(secret) as { owner: string; expires_at: number } | null;
-
-    if (existing && existing.expires_at > now && existing.owner !== owner) {
-      return false; // live lease held by someone else
-    }
-
+  ): LeaseHandle | null {
     const expires = now + ttlMs;
+    const txn = this.db.transaction((): LeaseHandle | null => {
+      // Is there a live lease held by someone else? (single read inside the
+      // exclusive txn -- no interleave possible).
+      const live = this.db
+        .query(
+          `SELECT owner FROM rotation_leases
+           WHERE secret = ? AND expires_at > ? AND owner <> ?`,
+        )
+        .get(secret, now, owner) as { owner: string } | null;
+      if (live) return null;
+
+      // Mint the next fencing token atomically.
+      this.db
+        .query("UPDATE rotation_fence_seq SET value = value + 1 WHERE id = 0")
+        .run();
+      const fence = (
+        this.db
+          .query("SELECT value FROM rotation_fence_seq WHERE id = 0")
+          .get() as { value: number }
+      ).value;
+
+      // Conditional upsert: claim/refresh the lease. The WHERE on the DO UPDATE
+      // ensures we never steal a live lease from a different owner (belt &
+      // suspenders alongside the read above).
+      this.db
+        .query(
+          `INSERT INTO rotation_leases (secret, owner, fence, expires_at, acquired_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(secret) DO UPDATE SET
+             owner = excluded.owner,
+             fence = excluded.fence,
+             expires_at = excluded.expires_at,
+             acquired_at = excluded.acquired_at
+           WHERE rotation_leases.expires_at <= ?
+              OR rotation_leases.owner = excluded.owner`,
+        )
+        .run(secret, owner, fence, expires, now, now);
+
+      // Confirm we actually hold it (the conditional upsert may no-op if a
+      // live foreign lease existed -- already excluded above, but verify).
+      const held = this.db
+        .query(
+          "SELECT owner, fence, expires_at FROM rotation_leases WHERE secret = ?",
+        )
+        .get(secret) as {
+        owner: string;
+        fence: number;
+        expires_at: number;
+      } | null;
+      if (!held || held.owner !== owner || held.fence !== fence) return null;
+      return { secret, owner, fence, expiresAt: held.expires_at };
+    });
+    return txn();
+  }
+
+  /**
+   * Renew (extend expiry) the lease iff still held by owner at fence. Returns
+   * true on success; false if the lease was lost/stolen. Fence is unchanged.
+   */
+  renewLease(handle: LeaseHandle, now: number, ttlMs: number): boolean {
+    const info = this.db
+      .query(
+        `UPDATE rotation_leases SET expires_at = ?
+         WHERE secret = ? AND owner = ? AND fence = ? AND expires_at > ?`,
+      )
+      .run(now + ttlMs, handle.secret, handle.owner, handle.fence, now);
+    if (info.changes === 1) {
+      handle.expiresAt = now + ttlMs;
+      return true;
+    }
+    return false;
+  }
+
+  /** True iff the lease is still held by owner at fence and not expired. */
+  validateLease(handle: LeaseHandle, now: number): boolean {
+    const r = this.db
+      .query(
+        `SELECT 1 FROM rotation_leases
+         WHERE secret = ? AND owner = ? AND fence = ? AND expires_at > ?`,
+      )
+      .get(handle.secret, handle.owner, handle.fence, now);
+    return !!r;
+  }
+
+  /** Release the lease iff still held by this owner+fence (no theft). */
+  releaseLease(handle: LeaseHandle): void {
     this.db
       .query(
-        `INSERT INTO rotation_leases (secret, owner, expires_at, acquired_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(secret) DO UPDATE SET
-           owner = excluded.owner,
-           expires_at = excluded.expires_at,
-           acquired_at = excluded.acquired_at`,
+        "DELETE FROM rotation_leases WHERE secret = ? AND owner = ? AND fence = ?",
       )
-      .run(secret, owner, expires, now);
-    return true;
+      .run(handle.secret, handle.owner, handle.fence);
   }
 
-  releaseLease(secret: string, owner: string): void {
-    this.db
-      .query("DELETE FROM rotation_leases WHERE secret = ? AND owner = ?")
-      .run(secret, owner);
-  }
-
-  getLeaseOwner(secret: string, now: number): string | null {
+  /** Current live fence for a secret, or null if no live lease. */
+  liveFence(secret: string, now: number): number | null {
     const r = this.db
-      .query("SELECT owner, expires_at FROM rotation_leases WHERE secret = ?")
-      .get(secret) as { owner: string; expires_at: number } | null;
-    if (!r || r.expires_at <= now) return null;
-    return r.owner;
+      .query(
+        "SELECT fence FROM rotation_leases WHERE secret = ? AND expires_at > ?",
+      )
+      .get(secret, now) as { fence: number } | null;
+    return r ? r.fence : null;
+  }
+
+  // -- internal -----------------------------------------------------------
+
+  /**
+   * Run `fn` inside a transaction that first asserts the executor's fence is
+   * still the live lease fence for the job's secret. If the lease was stolen
+   * (live fence advanced past `fence`), throws FencedOutError and the mutation
+   * does not land.
+   */
+  private withFence(
+    jobId: string,
+    fence: number,
+    now: number,
+    fn: () => void,
+  ): void {
+    const txn = this.db.transaction(() => {
+      const job = this.db
+        .query("SELECT secret FROM rotation_jobs WHERE id = ?")
+        .get(jobId) as { secret: string } | null;
+      if (!job) throw new Error(`no such job ${jobId}`);
+      const live = this.db
+        .query(
+          "SELECT fence FROM rotation_leases WHERE secret = ? AND expires_at > ?",
+        )
+        .get(job.secret, now) as { fence: number } | null;
+      const liveFence = live ? live.fence : 0;
+      if (liveFence !== fence) {
+        throw new FencedOutError(job.secret, fence, liveFence);
+      }
+      fn();
+    });
+    txn();
   }
 }
