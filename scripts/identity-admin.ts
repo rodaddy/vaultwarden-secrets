@@ -36,7 +36,7 @@ function reportStorePath(): void {
     console.error(
       "warning: VW_STATE_DIR is unset — using the per-user default store, " +
         "NOT the service store. To target the service store, run:\n" +
-        "  sudo -u vwsecrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \\\n" +
+        "  sudo -u vaultwarden-secrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \\\n" +
         "    bun run scripts/identity-admin.ts <cmd> ...",
     );
   }

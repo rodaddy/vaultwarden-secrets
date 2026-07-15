@@ -23,6 +23,21 @@
 #   VW_PREFLIGHT_ONLY  =1 → run preflight for all units and exit (test hook)
 #   VW_SYNC          =0  → skip git fetch/sync/restart (preflight-only harness)
 #
+# LEAST PRIVILEGE (deroot): this script runs as the OPERATOR user `rico`, NOT
+# root. It never opens a root shell and never uses blanket sudo. Every
+# privileged action (systemctl, daemon-reload, chown/install into the state
+# dir, per-user readability probes) goes through run_privileged(), which runs
+# the command directly when the caller happens to be root but otherwise prefixes
+# `sudo -n` (non-interactive). The exact commands it may run are the ONLY grants
+# in deploy/sudoers.d/vaultwarden-secrets. A missing grant fails loudly rather
+# than prompting or silently degrading.
+#   VW_SERVICE_USER     service identity referenced by preflight (default
+#                       vaultwarden-secrets; the account itself is provisioned
+#                       UPSTREAM in the TN01/rtech-infra scheme, not by this repo)
+#   VW_DEPLOY_SSH_KEY   operator's read-only GitHub deploy key
+#                       (default ${HOME}/.ssh/id_ed25519_github — the OPERATOR's
+#                       key, never /root's)
+#
 # When sourced with VW_LIB_ONLY=1, only defines functions (for shell tests).
 
 set -eu
@@ -39,9 +54,43 @@ PROBE_RETRIES="${VW_PROBE_RETRIES:-10}"
 PROBE_SLEEP="${VW_PROBE_SLEEP:-2}"
 RETIRED_UNIT="vw-deploy-webhook.service"
 RETIRED_UNIT_PATH="$SYSTEMD_DIR/$RETIRED_UNIT"
+# Service identity referenced by preflight. Provisioned UPSTREAM; this repo only
+# references it and fails closed (preflight) if it is absent.
+VW_SERVICE_USER="${VW_SERVICE_USER:-vaultwarden-secrets}"
+# Operator's read-only GitHub deploy key — NOT root's. Configurable so the same
+# script works for any operator identity; defaults under the operator's HOME.
+VW_DEPLOY_SSH_KEY="${VW_DEPLOY_SSH_KEY:-${HOME:-/home/rico}/.ssh/id_ed25519_github}"
+# Path to the scoped sudoers grant, surfaced in errors when a NOPASSWD grant is
+# missing so the operator knows exactly which file to install/fix.
+SUDOERS_FILE="/etc/sudoers.d/vaultwarden-secrets"
 
 log()  { echo "[deploy] $*"; }
 err()  { echo "[deploy] ERROR: $*" >&2; }
+
+# Run a privileged command with least privilege:
+#   - if the caller is already root (id -u == 0), run it directly;
+#   - otherwise prefix `sudo -n` (non-interactive). If the matching NOPASSWD
+#     grant is missing, sudo -n fails immediately (no prompt) and we surface a
+#     loud, actionable error pointing at the scoped sudoers file. We NEVER fall
+#     back to a root shell or a blanket/interactive sudo.
+run_privileged() {
+  if [ "$(id -u)" = "0" ]; then
+    "$@"
+    return $?
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    err "not root and 'sudo' is unavailable; cannot run privileged: $*"
+    err "install the scoped grant at $SUDOERS_FILE and ensure sudo is present"
+    return 1
+  fi
+  if sudo -n "$@"; then
+    return 0
+  fi
+  _rc=$?
+  err "privileged command failed (rc=$_rc): sudo -n $*"
+  err "if this is a NOPASSWD-grant gap, fix $SUDOERS_FILE (validate: visudo -cf $SUDOERS_FILE)"
+  return "$_rc"
+}
 
 # --- preflight helpers ------------------------------------------------------
 
@@ -58,16 +107,35 @@ user_exists() {
   id "$1" >/dev/null 2>&1
 }
 
-# Is a path readable by a given user? Uses sudo -u when available; falls back to
-# a plain readability test (test harness runs as the invoking user).
+# Is a path readable by a given user?
+#   - When the checked user IS the caller (or the caller is that user's shell in
+#     the test harness), a plain `test -r` is authoritative.
+#   - Otherwise we must check AS that user. As root that's a direct `sudo -u`;
+#     as the operator `rico` it's `sudo -n -u <user> test -r` via run_privileged
+#     semantics (the scoped grant must allow it). If we genuinely cannot check
+#     (no sudo, not root, not the same user), we FAIL CLOSED — a preflight that
+#     cannot prove readability must not silently pass.
 readable_by() {
   _user="$1"; _path="$2"
   [ -e "$_path" ] || return 1
-  if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-    sudo -u "$_user" test -r "$_path"
-  else
+  # If we ARE the target user, a direct read test is authoritative.
+  if [ "$_user" = "$(id -un)" ]; then
     test -r "$_path"
+    return $?
   fi
+  # Root can check any user directly.
+  if [ "$(id -u)" = "0" ] && command -v sudo >/dev/null 2>&1; then
+    sudo -u "$_user" test -r "$_path"
+    return $?
+  fi
+  # Non-root operator: check as the service user via scoped, non-interactive
+  # sudo. run_privileged surfaces a loud error if the grant is missing.
+  if command -v sudo >/dev/null 2>&1; then
+    run_privileged -u "$_user" test -r "$_path"
+    return $?
+  fi
+  err "cannot verify $_path is readable by $_user (no sudo, not root, not $_user) — failing closed"
+  return 1
 }
 
 # Preflight a single unit file. Returns 0 if safe to sync, nonzero otherwise.
@@ -77,11 +145,14 @@ preflight_unit() {
   _name=$(basename "$_unit")
   _ok=0
 
-  # 1. Required service user must exist.
+  # 1. Required service user must exist. The unit's User= is authoritative; it
+  #    should be VW_SERVICE_USER (default vaultwarden-secrets), which is
+  #    provisioned UPSTREAM (TN01/rtech-infra), never by this repo. Fail closed
+  #    if it is absent — this repo only REFERENCES the account.
   _user=$(unit_get "$_unit" "User" | head -n1)
   if [ -n "$_user" ] && [ "$_user" != "root" ]; then
     if ! user_exists "$_user"; then
-      err "$_name: required User=$_user does not exist"
+      err "$_name: required User=$_user does not exist (service user is provisioned upstream; VW_SERVICE_USER=$VW_SERVICE_USER)"
       _ok=1
     fi
   fi
@@ -170,14 +241,16 @@ deploy_main() {
   cd "$REPO_DIR"
 
   # Retire the removed unauthenticated network deploy trigger.
-  systemctl disable --now "$RETIRED_UNIT" >/dev/null 2>&1 || true
+  run_privileged systemctl disable --now "$RETIRED_UNIT" >/dev/null 2>&1 || true
   if [ -e "$RETIRED_UNIT_PATH" ] || [ -L "$RETIRED_UNIT_PATH" ]; then
-    rm -f "$RETIRED_UNIT_PATH"
+    run_privileged rm -f "$RETIRED_UNIT_PATH"
     log "Removed retired $RETIRED_UNIT"
   fi
-  systemctl daemon-reload
+  run_privileged systemctl daemon-reload
 
-  GIT_SSH_COMMAND="ssh -i /root/.ssh/id_ed25519_github -o StrictHostKeyChecking=accept-new" \
+  # Fetch as the OPERATOR using the operator's read-only deploy key (never
+  # /root's key). VW_DEPLOY_SSH_KEY is configurable; default is under $HOME.
+  GIT_SSH_COMMAND="ssh -i $VW_DEPLOY_SSH_KEY -o StrictHostKeyChecking=accept-new" \
     git fetch origin "$BRANCH" 2>/dev/null
 
   LOCAL=$(git rev-parse HEAD)
@@ -210,9 +283,10 @@ deploy_main() {
   fi
 
   # Start each deploy with a clean backup dir so a stale backup from a prior
-  # deploy can never become a wrong restore source (DEP-2).
-  rm -rf "$BACKUP_DIR"
-  mkdir -p "$BACKUP_DIR"
+  # deploy can never become a wrong restore source (DEP-2). SYSTEMD_DIR is
+  # root-owned, so these mutations are privileged.
+  run_privileged rm -rf "$BACKUP_DIR"
+  run_privileged mkdir -p "$BACKUP_DIR"
 
   # Sync changed units, backing up the previous version first (DEP-2).
   _changed=0
@@ -220,12 +294,12 @@ deploy_main() {
     _name=$(basename "$unit")
     if ! cmp -s "$unit" "$SYSTEMD_DIR/$_name" 2>/dev/null; then
       backup_unit "$_name"
-      cp "$unit" "$SYSTEMD_DIR/$_name"
+      run_privileged install -m 0644 "$unit" "$SYSTEMD_DIR/$_name"
       log "Updated $_name"
       _changed=1
     fi
   done
-  systemctl daemon-reload
+  run_privileged systemctl daemon-reload
 
   # DEP-2: guarantee a restorable snapshot of the MCP unit BEFORE restarting it,
   # whether or not its own content changed this deploy. Otherwise a failed
@@ -250,13 +324,13 @@ deploy_main() {
   # Restart the protected MCP unit (only ever stopped via its own restart), then
   # verify health; roll back on failure. Literal name kept for the retirement
   # contract test.
-  systemctl restart vaultwarden-secrets-mcp.service
+  run_privileged systemctl restart vaultwarden-secrets-mcp.service
   if verify_mcp_health; then
     log "Protected MCP service restarted and healthy"
   else
     err "MCP unhealthy after restart — rolling back $MCP_UNIT"
     if [ "$_mcp_preexisted" -eq 1 ] && restore_unit "$MCP_UNIT"; then
-      systemctl restart "$MCP_UNIT"
+      run_privileged systemctl restart "$MCP_UNIT"
       if verify_mcp_health; then
         err "rolled back to previous $MCP_UNIT (healthy); deploy FAILED"
       else
@@ -276,7 +350,8 @@ deploy_main() {
 
 # Bounded health check for the MCP unit (DEP-2): is-active + probe on MCP_PORT.
 verify_mcp_health() {
-  if ! systemctl is-active --quiet "$MCP_UNIT"; then
+  # `is-active` is a READ; the scoped sudoers allows it with flags (--quiet).
+  if ! run_privileged systemctl is-active --quiet "$MCP_UNIT"; then
     err "$MCP_UNIT is not active after restart"
     return 1
   fi
@@ -297,9 +372,10 @@ verify_mcp_health() {
 
 backup_unit() {
   _name="$1"
-  mkdir -p "$BACKUP_DIR"
+  # BACKUP_DIR lives under the root-owned SYSTEMD_DIR — privileged writes.
+  run_privileged mkdir -p "$BACKUP_DIR"
   if [ -f "$SYSTEMD_DIR/$_name" ]; then
-    cp "$SYSTEMD_DIR/$_name" "$BACKUP_DIR/$_name"
+    run_privileged install -m 0644 "$SYSTEMD_DIR/$_name" "$BACKUP_DIR/$_name"
     log "backed up $_name -> $BACKUP_DIR/$_name"
   fi
 }
@@ -307,8 +383,8 @@ backup_unit() {
 restore_unit() {
   _name="$1"
   if [ -f "$BACKUP_DIR/$_name" ]; then
-    cp "$BACKUP_DIR/$_name" "$SYSTEMD_DIR/$_name"
-    systemctl daemon-reload
+    run_privileged install -m 0644 "$BACKUP_DIR/$_name" "$SYSTEMD_DIR/$_name"
+    run_privileged systemctl daemon-reload
     log "restored $_name from backup"
     return 0
   fi
@@ -320,9 +396,9 @@ restore_unit() {
 # was just installed but never had a prior version to restore.
 remove_unit() {
   _name="$1"
-  systemctl stop "$_name" 2>/dev/null || true
-  rm -f "$SYSTEMD_DIR/$_name"
-  systemctl daemon-reload
+  run_privileged systemctl stop "$_name" 2>/dev/null || true
+  run_privileged rm -f "$SYSTEMD_DIR/$_name"
+  run_privileged systemctl daemon-reload
   log "removed newly-installed $_name (no prior version to roll back to)"
 }
 

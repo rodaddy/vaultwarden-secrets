@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=vwsecrets
-Group=vwsecrets
+User=vaultwarden-secrets
+Group=ai-services
 WorkingDirectory=/opt/vaultwarden-secrets
 Environment="HOME=/var/lib/vaultwarden-secrets"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"

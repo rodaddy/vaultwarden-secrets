@@ -148,7 +148,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=vw-secrets
+# Non-root service identity (group ai-services), provisioned upstream (TN01).
+User=vaultwarden-secrets
+Group=ai-services
 WorkingDirectory=/opt/vaultwarden-secrets
 Environment="SECURITY_PROFILE=im-aware"
 Environment="API_TOKEN_LXC200=..."
