@@ -430,6 +430,8 @@ Legacy `API_TOKEN_<CLIENT>` (REST/MCP) and `PROXY_TOKEN` (proxy only) are accept
 
 **Least-privilege runtime** — services run as the non-root `vaultwarden-secrets` user (group `ai-services`) with systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`). Automated deploys run as an **operator** (not root) via command-scoped `sudo -n` — no root shell, no blanket sudo. `bun run drift-check` compares the repo-declared systemd envelope against the live host (unit content, listener exposure, service identity, state-path perms, liveness) and exits non-zero on any drift. See [docs/runtime/envelope.md](docs/runtime/envelope.md).
 
+**Hardened admin panel** — the upstream Vaultwarden `ADMIN_TOKEN` is stored as an **Argon2 PHC hash**, not plaintext, so a leaked config can't be replayed as an admin login. See [docs/operations/admin-token.md](docs/operations/admin-token.md) for the hashing recipe, the env-file dialect traps (compose `$$`-escape vs. docker `--env-file` vs. systemd `EnvironmentFile`), and container-level verification.
+
 ---
 
 ## Deployment
@@ -445,6 +447,7 @@ The full production guide is [deploy/DEPLOY.md](deploy/DEPLOY.md). Highlights:
   ```
 - systemd units for the REST API (:3000), MCP (:3001), cred-proxy (:3003), snapshot timer, backup timer, and deploy timer live in `deploy/systemd/`. The retired unauthenticated deploy trigger on port 3002 is removed and must not be restored.
 - **Backups** (`deploy/systemd/vw-backup.{service,timer}`) package the state directory with SQLite's online `.backup`, encrypt with AES-256-GCM, and ship off-host. `bun run scripts/backup-health.ts` fails closed on missing/stale/corrupt backups; `bun run scripts/restore-drill.ts <archive> --target <dir>` runs a monthly restore drill with `PRAGMA integrity_check`. See [docs/operations/backup.md](docs/operations/backup.md).
+- **Vault item conventions** — naming (`Service - subject`), one identity per item, snake_case field canon, and the uri→fields→notes data hierarchy (notes never hold secret values) that keep lookups deterministic. See [docs/operations/vault-item-standard.md](docs/operations/vault-item-standard.md).
 
 ---
 
