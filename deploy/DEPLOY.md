@@ -58,7 +58,7 @@ sudo mv vaultwarden-secrets-v* vaultwarden-secrets
 
 ### 2. Service User (provisioned upstream)
 
-The runtime services run as the dedicated non-root user `vaultwarden-secrets`
+The runtime services run as the existing non-root user `mcp2cli`
 (group `ai-services`, alongside sibling service users like `mcp2cli`). This
 account is provisioned **UPSTREAM** in the TN01/rtech-infra directory scheme
 (UIDs synced from TN01) — do NOT create it here. Deploy preflight fails closed
@@ -69,7 +69,7 @@ if it is absent.
 id vaultwarden-secrets
 
 # Set ownership of the code tree to the service identity:
-sudo chown -R vaultwarden-secrets:ai-services /opt/vaultwarden-secrets
+sudo chown -R mcp2cli:ai-services /opt/vaultwarden-secrets
 ```
 
 ### 3. Configure Environment
@@ -106,7 +106,7 @@ NODE_ENV=production
 
 ```bash
 sudo chmod 600 .env
-sudo chown vaultwarden-secrets:ai-services .env
+sudo chown mcp2cli:ai-services .env
 ```
 
 ### 4. Install systemd Service
@@ -134,7 +134,7 @@ sudo systemctl status vaultwarden-secrets
 
 **Service configuration notes:**
 
-- **User:** Change `User=vaultwarden-secrets` if using different user
+- **User:** Change `User=mcp2cli` if using a different user
 - **WorkingDirectory:** Update if installed in different location
 - **Environment variables:** Can be set in service file OR use `.env` file
 - **ExecStart:** Verify bun path (`which bun`) matches `/usr/local/bin/bun`
@@ -285,7 +285,7 @@ sudo mv vaultwarden-secrets-vX.Y.Z vaultwarden-secrets
 sudo cp /opt/vaultwarden-secrets.backup/.env /opt/vaultwarden-secrets/
 
 # Fix permissions
-sudo chown -R vaultwarden-secrets:ai-services /opt/vaultwarden-secrets
+sudo chown -R mcp2cli:ai-services /opt/vaultwarden-secrets
 
 # Start service
 sudo systemctl start vaultwarden-secrets

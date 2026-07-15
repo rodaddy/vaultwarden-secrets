@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=vaultwarden-secrets
+User=mcp2cli
 Group=ai-services
 WorkingDirectory=/opt/vaultwarden-secrets
 Environment="HOME=/var/lib/vaultwarden-secrets"

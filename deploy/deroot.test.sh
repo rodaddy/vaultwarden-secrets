@@ -140,8 +140,8 @@ check "git fetch uses VW_DEPLOY_SSH_KEY (not a hardcoded key)" 0 "$rc"
 rc=0; grep -q 'VW_SERVICE_USER' "$DEPLOY_SH" || rc=1
 check "deploy.sh exposes VW_SERVICE_USER" 0 "$rc"
 
-rc=0; grep -q 'VW_SERVICE_USER:-vaultwarden-secrets' "$DEPLOY_SH" || rc=1
-check "VW_SERVICE_USER defaults to vaultwarden-secrets" 0 "$rc"
+rc=0; grep -q 'VW_SERVICE_USER:-mcp2cli' "$DEPLOY_SH" || rc=1
+check "VW_SERVICE_USER defaults to mcp2cli" 0 "$rc"
 
 # --- 7. Scoped sudoers file exists and validates ----------------------------
 rc=0; [ -f "$SUDOERS" ] || rc=1
