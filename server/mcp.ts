@@ -33,18 +33,9 @@ import { snapshotManager, type BitwVaultItem } from "../snapshot";
 import { getVaultSession } from "../keychain";
 import { loadBearerTokens } from "./middleware/bearer-auth";
 import { resolveIdentity } from "./middleware/workload-identity";
-import {
-  loadDenyFields,
-  filterDeniedFields,
-  isFieldDenied,
-} from "./utils/folder-scope";
 import { resolveIngressTls } from "./utils/tls";
 import { getProfile } from "./profiles";
-import {
-  resolveService,
-  filterServiceInfoDenied,
-  type ServiceInfo,
-} from "./service-resolver";
+import { resolveService } from "./service-resolver";
 import { resolveCredential } from "./credential-resolver";
 import {
   buildCreateTemplate,
@@ -150,7 +141,6 @@ async function initProfileFolderScope(): Promise<void> {
 }
 
 await initProfileFolderScope();
-loadDenyFields();
 
 /** Check if an item is in an allowed folder */
 function isItemAllowed(item: BitwVaultItem): boolean {
@@ -272,13 +262,6 @@ function rejectNonDefaultVault(
   return null;
 }
 
-/** Field-deny filter for get_service, bound to `subject` (see service-resolver). */
-function filterServiceDenied(subject: string, info: ServiceInfo): ServiceInfo {
-  return filterServiceInfoDenied(info, (obj) =>
-    filterDeniedFields(subject, obj),
-  );
-}
-
 // ============================================================================
 // MCP Server factory
 // ============================================================================
@@ -310,6 +293,9 @@ function createMcpServer(subject: string): McpServer {
     { readOnlyHint: true },
     async ({ query, limit, vault }) => {
       try {
+        const vaultErr = rejectNonDefaultVault(vault);
+        if (vaultErr) return vaultErr;
+
         let secrets = await listSecrets(undefined, { vault });
         secrets = await filterByScope(secrets);
         const lowerQuery = query.toLowerCase();
@@ -369,18 +355,6 @@ function createMcpServer(subject: string): McpServer {
             `Error: Secret "${baseName}" not found or not in allowed folder scope`,
           );
 
-        // SECURITY: `name` may be a path naming a field (e.g. item.password,
-        // item.login.password, item.fields.X). If the named field is denied for
-        // this subject, fail CLOSED before reading. A bare item name (no field
-        // segment) canonicalizes to the item name itself, which is not a deny
-        // rule, so plain reads are unaffected.
-        const fieldRef = name.slice(baseName.length + 1); // "" if no field part
-        if (fieldRef && isFieldDenied(subject, fieldRef)) {
-          return err(
-            `Access denied: field "${fieldRef}" is restricted for this client.`,
-          );
-        }
-
         const value = await getSecret(name, { vault });
         return text(value);
       } catch (error) {
@@ -410,10 +384,7 @@ function createMcpServer(subject: string): McpServer {
             `Error: Secret "${name}" not found or not in allowed folder scope`,
           );
 
-        const fields = filterDeniedFields(
-          subject,
-          await getSecretObject(name, { vault }),
-        );
+        const fields = await getSecretObject(name, { vault });
         return json(fields);
       } catch (error) {
         return err(
@@ -494,11 +465,7 @@ function createMcpServer(subject: string): McpServer {
           );
         }
 
-        // SECURITY: get_service serializes username/password/uri/notes and each
-        // item's custom fields — the SAME real flat-key shape the denylist
-        // guards. Route every returned item through filterDeniedFields so a
-        // subject denied `password` cannot read it via get_service.
-        return json(filterServiceDenied(subject, result));
+        return json(result);
       } catch (error) {
         return err(
           `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -533,8 +500,8 @@ function createMcpServer(subject: string): McpServer {
         const vaultErr = rejectNonDefaultVault(vault);
         if (vaultErr) return vaultErr;
 
-        // Pure resolution (exact→fuzzy→deny/scope) via credential-resolver;
-        // this adapter supplies the real scope-aware vault I/O closures.
+        // Pure resolution (exact→fuzzy→scope) via credential-resolver; this
+        // adapter supplies the real scope-aware vault I/O closures.
         const outcome = await resolveCredential(query, field, {
           findScoped: async (name) => {
             const item = await findScopedItem(name);
@@ -544,8 +511,6 @@ function createMcpServer(subject: string): McpServer {
             filterByScope(await listSecrets(undefined, { vault })),
           getSecret: (path) => getSecret(path, { vault }),
           getSecretObject: (name) => getSecretObject(name, { vault }),
-          filterDenied: (obj) => filterDeniedFields(subject, obj),
-          isDenied: (fieldRef) => isFieldDenied(subject, fieldRef),
         });
         if (!outcome.ok) return err(outcome.error);
         return json(outcome.value);

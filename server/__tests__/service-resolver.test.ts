@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import type { BitwVaultItem } from "../../snapshot";
-import { resolveService, filterServiceInfoDenied } from "../service-resolver";
+import { resolveService } from "../service-resolver";
 
 function makeItem(
   overrides: Partial<BitwVaultItem> & { name: string },
@@ -345,59 +345,5 @@ describe("resolveService", () => {
     expect(result.api?.uri).toBeNull();
     expect(result.api?.notes).toBeNull();
     expect(result.api?.fields).toEqual({});
-  });
-});
-
-describe("filterServiceInfoDenied (get_service field deny)", () => {
-  // A flat filter that removes the denied real keys (models a subject denied
-  // `password` + custom field `SECRET`).
-  const deny = new Set(["password", "secret"]);
-  const filterFlat = <T extends Record<string, unknown>>(obj: T): T => {
-    const out = { ...obj };
-    for (const k of Object.keys(out)) {
-      if (deny.has(k.toLowerCase())) delete out[k];
-    }
-    return out;
-  };
-
-  test("strips denied password + custom field from api and hosts", () => {
-    const items: BitwVaultItem[] = [
-      makeItem({
-        name: "REDIS_API",
-        login: { username: "svc", password: "test-pw-abc" },
-        fields: [
-          { name: "SECRET", value: "test-secret-xyz", type: 1 },
-          { name: "region", value: "us-east", type: 0 },
-        ],
-      }),
-      makeItem({
-        name: "redis01",
-        login: { username: "host", password: "test-host-pw" },
-      }),
-    ];
-    const resolved = resolveService("redis", items);
-    const filtered = filterServiceInfoDenied(resolved, filterFlat);
-
-    // API: password nulled, SECRET stripped, non-denied kept.
-    expect(filtered.api?.password).toBeNull();
-    expect(filtered.api?.username).toBe("svc");
-    expect(filtered.api?.fields).toEqual({ region: "us-east" });
-    // Host: password nulled too.
-    expect(filtered.hosts[0]?.password).toBeNull();
-    expect(filtered.hosts[0]?.username).toBe("host");
-    // Shape preserved: itemCount unchanged.
-    expect(filtered.itemCount).toBe(resolved.itemCount);
-  });
-
-  test("no-op filter leaves everything intact (parity guard)", () => {
-    const items: BitwVaultItem[] = [
-      makeItem({
-        name: "REDIS_API",
-        login: { username: "svc", password: "test-pw-abc" },
-      }),
-    ];
-    const resolved = resolveService("redis", items);
-    const filtered = filterServiceInfoDenied(resolved, (o) => o);
-    expect(filtered.api?.password).toBe("test-pw-abc");
   });
 });

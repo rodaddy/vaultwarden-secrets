@@ -2,9 +2,9 @@
  * Pure resolution logic for the get_credential MCP tool.
  *
  * Split out of server/mcp.ts (matching the service-resolver / vault-client
- * pattern) so the exact-then-fuzzy match algorithm and the deny/scope decision
- * flow are unit-testable offline without a live vault or snapshot. The MCP tool
- * in mcp.ts is a thin adapter that supplies the real I/O closures.
+ * pattern) so the exact-then-fuzzy match algorithm and the scope decision flow
+ * are unit-testable offline without a live vault or snapshot. The MCP tool in
+ * mcp.ts is a thin adapter that supplies the real I/O closures.
  *
  * @module server/credential-resolver
  */
@@ -57,32 +57,6 @@ export interface CredentialResolverDeps {
   getSecret: (path: string) => Promise<string>;
   /** Read the full field object for an item name. */
   getSecretObject: (name: string) => Promise<Record<string, string>>;
-  /** Strip denied fields from a flat fields object for the subject. */
-  filterDenied: <T extends Record<string, unknown>>(obj: T) => T;
-  /**
-   * Whether a single field reference is denied for the subject. Must
-   * canonicalize path-style refs (login.password, fields.X, bare password) to
-   * the real flat key before deciding — same rule as filterDenied.
-   */
-  isDenied: (fieldRef: string) => boolean;
-}
-
-/**
- * Which REAL flat key the item's primary value (getSecret(name) smart-fallback)
- * resolves to, given the item's fields object. Mirrors index.ts
- * extractFieldFromItem's default branch: password → notes → first custom field.
- * Returns null if no primary value exists. Used to withhold the primary value
- * when its underlying field is denied (fail closed).
- */
-export function primaryValueKey(fields: Record<string, string>): string | null {
-  if ("password" in fields) return "password";
-  if ("notes" in fields) return "notes";
-  // First custom field = first key that is not a built-in login/notes key.
-  const builtins = new Set(["username", "password", "uri", "totp", "notes"]);
-  for (const k of Object.keys(fields)) {
-    if (!builtins.has(k)) return k;
-  }
-  return null;
 }
 
 export type CredentialResult =
@@ -100,10 +74,9 @@ const NOT_FOUND = (query: string) =>
 
 /**
  * Resolve a credential: exact match first, else best fuzzy candidate. If a
- * specific `field` is requested it is deny-checked (fail-closed) BEFORE any
- * read; otherwise all fields are returned with denied fields stripped plus a
- * primary value that is WITHHELD when its underlying field is denied. Never
- * returns secret material in an error.
+ * specific `field` is requested, return just that field's value; otherwise
+ * return all fields plus a best-effort primary value. Never returns secret
+ * material in an error.
  */
 export async function resolveCredential(
   query: string,
@@ -133,28 +106,15 @@ export async function resolveCredential(
   };
 
   if (field) {
-    // Deny check BEFORE touching material (fail closed).
-    if (deps.isDenied(field)) {
-      return {
-        ok: false,
-        error: `Access denied: field "${field}" is restricted for this client.`,
-      };
-    }
     result.field = field;
     result.value = await deps.getSecret(`${name}.${field}`);
   } else {
-    const rawFields = await deps.getSecretObject(name);
-    result.fields = deps.filterDenied(rawFields);
-    // Primary value maps to a real field (password → notes → first custom
-    // field). Withhold it if that underlying field is denied — otherwise
-    // `value` would leak a field the `fields` object correctly stripped.
-    const primaryKey = primaryValueKey(rawFields);
-    if (primaryKey && !deps.isDenied(primaryKey)) {
-      try {
-        result.value = await deps.getSecret(name);
-      } catch {
-        /* no primary value available */
-      }
+    result.fields = await deps.getSecretObject(name);
+    // Best-effort primary value (password → notes → first custom field).
+    try {
+      result.value = await deps.getSecret(name);
+    } catch {
+      /* no primary value available */
     }
   }
 

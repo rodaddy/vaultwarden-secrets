@@ -165,61 +165,6 @@ function buildHostInfo(item: BitwVaultItem): ServiceHostInfo {
   };
 }
 
-/**
- * Strip denied fields from a resolveService() result. `filterFlat` is the
- * subject-bound field-deny filter (server/utils/folder-scope filterDeniedFields
- * partially applied) — it removes denied keys from a flat object. The
- * credential-bearing top-level keys (username/password/uri/notes) are the real
- * flat field names the denylist matches; a stripped key becomes null to
- * preserve the declared response shape. Each item's custom `fields` record is
- * filtered too. Pure + injectable so get_service's enforcement is unit-testable.
- *
- * SECURITY: get_service must honor the same denylist as get_secret_fields /
- * get_credential; routing every returned item through the shared flat filter
- * here is that single enforcement point for this tool.
- */
-export function filterServiceInfoDenied(
-  info: ServiceInfo,
-  filterFlat: <T extends Record<string, unknown>>(obj: T) => T,
-): ServiceInfo {
-  const scrubCreds = (c: {
-    username: string | null;
-    password: string | null;
-    uri: string | null;
-    notes: string | null;
-  }) => {
-    const kept = filterFlat({
-      username: c.username,
-      password: c.password,
-      uri: c.uri,
-      notes: c.notes,
-    });
-    return {
-      username: kept.username ?? null,
-      password: kept.password ?? null,
-      uri: kept.uri ?? null,
-      notes: kept.notes ?? null,
-    };
-  };
-  const scrubApi = (api: ServiceApiInfo): ServiceApiInfo => ({
-    itemName: api.itemName,
-    ...scrubCreds(api),
-    fields: filterFlat(api.fields),
-  });
-  const scrubHost = (host: ServiceHostInfo): ServiceHostInfo => ({
-    itemName: host.itemName,
-    ...scrubCreds(host),
-    fields: filterFlat(host.fields),
-    crossRef: host.crossRef,
-  });
-  return {
-    service: info.service,
-    api: info.api ? scrubApi(info.api) : null,
-    hosts: info.hosts.map(scrubHost),
-    itemCount: info.itemCount,
-  };
-}
-
 export function resolveService(
   serviceName: string,
   items: BitwVaultItem[],
