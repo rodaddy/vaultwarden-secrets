@@ -1,0 +1,16 @@
+[Unit]
+Description=Encrypted Vaultwarden Secrets state backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vaultwarden-secrets
+Group=vaultwarden-secrets
+WorkingDirectory=/opt/vaultwarden-secrets
+Environment="HOME=/var/lib/vaultwarden-secrets"
+Environment="PATH=/var/lib/vaultwarden-secrets/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/etc/vaultwarden-secrets/backup.env
+ExecStart=/usr/bin/env bun run scripts/backup.ts
+NoNewPrivileges=true
+PrivateTmp=true
