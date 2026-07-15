@@ -429,7 +429,7 @@ const host = process.env.HOST || "0.0.0.0";
 
 // Encrypted ingress (issue #14): enable TLS when TLS_CERT/TLS_KEY provided;
 // fail closed if VW_REQUIRE_TLS=1 without a cert.
-const tls = resolveIngressTls("rest");
+const tls = resolveIngressTls("rest", profile.tls);
 
 console.log(
   `Starting server on ${tls ? "https" : "http"}://${host}:${port}...`,

@@ -56,6 +56,17 @@ function safeHexEqual(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 }
 
+/**
+ * Parse an ISO timestamp to epoch millis, fail-closed (SEC-4). Returns null if
+ * the value is absent, and NaN as a sentinel for a present-but-unparseable
+ * value so the caller can reject the whole record instead of failing open.
+ */
+function parseTimestamp(value: string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : NaN;
+}
+
 /** Parse the id segment out of an opaque token. Returns null if malformed. */
 export function parseTokenId(token: string): string | null {
   // vwsk_<id>_<random>
@@ -133,13 +144,19 @@ export class IdentityService {
 
     if (record.revokedAt) return null;
 
-    if (record.expiresAt && Date.parse(record.expiresAt) <= now) return null;
+    // Structural sanity — a corrupt record fails closed (SEC-4).
+    if (!Array.isArray(record.audiences)) return null;
+
+    // Expiry: absent → non-expiring; unparseable (NaN) → reject (fail closed).
+    const expiresAt = parseTimestamp(record.expiresAt);
+    if (Number.isNaN(expiresAt)) return null;
+    if (expiresAt !== null && expiresAt <= now) return null;
 
     // Rotation overlap cutoff: a superseded token dies at supersededAt even if
-    // its own expiresAt is later.
-    if (record.supersededAt && Date.parse(record.supersededAt) <= now) {
-      return null;
-    }
+    // its own expiresAt is later. Unparseable cutoff → reject (fail closed).
+    const supersededAt = parseTimestamp(record.supersededAt);
+    if (Number.isNaN(supersededAt)) return null;
+    if (supersededAt !== null && supersededAt <= now) return null;
 
     if (!record.audiences.includes(audience)) return null;
 

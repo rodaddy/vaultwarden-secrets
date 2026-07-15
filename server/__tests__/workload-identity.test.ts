@@ -6,7 +6,7 @@
  * that missing/downgraded auth fails closed with 401.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { Hono } from "hono";
 import { IdentityService } from "../identity/identity";
 import { MemoryIdentityStore } from "../identity/store";
@@ -184,5 +184,64 @@ describe("cross-interface equivalence (REST / MCP / proxy)", () => {
       await resolveIdentity(token, { audience: "mcp", service }),
     ).toBeNull();
     expect((await callWhoami(proxyApp, token)).status).toBe(401);
+  });
+});
+
+describe("legacy kill-switch VW_LEGACY_TOKENS=off (SEC-2)", () => {
+  const prev = process.env.VW_LEGACY_TOKENS;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.VW_LEGACY_TOKENS;
+    else process.env.VW_LEGACY_TOKENS = prev;
+  });
+
+  it("disables legacy bearer acceptance when off", async () => {
+    process.env.VW_LEGACY_TOKENS = "off";
+    const service = newService();
+    const legacyTokens = new Map([["legacy-abc", "lxc200"]]);
+    const app = appFor(service, "rest", { legacyTokens });
+    expect((await callWhoami(app, "legacy-abc")).status).toBe(401);
+  });
+
+  it("disables legacy PROXY_TOKEN acceptance when off", async () => {
+    process.env.VW_LEGACY_TOKENS = "off";
+    const service = newService();
+    const app = appFor(service, "proxy", { legacyProxyToken: "proxy-secret" });
+    expect((await callWhoami(app, "proxy-secret")).status).toBe(401);
+  });
+
+  it("still accepts NEW vwsk_ tokens when legacy is off", async () => {
+    process.env.VW_LEGACY_TOKENS = "off";
+    const service = newService();
+    const { token } = await service.issueToken({
+      subject: "svc:new",
+      audiences: ["rest"],
+    });
+    const app = appFor(service, "rest", {
+      legacyTokens: new Map([["legacy-abc", "lxc200"]]),
+    });
+    const res = await callWhoami(app, token);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ clientId: "svc:new" });
+  });
+
+  it("re-enables legacy acceptance for any non-off value", async () => {
+    process.env.VW_LEGACY_TOKENS = "on";
+    const service = newService();
+    const app = appFor(service, "rest", {
+      legacyTokens: new Map([["legacy-abc", "lxc200"]]),
+    });
+    const res = await callWhoami(app, "legacy-abc");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ clientId: "legacy:lxc200" });
+  });
+
+  it("PROXY_TOKEN is never cross-honored on REST/MCP (scoping)", async () => {
+    const service = newService();
+    // REST app given only legacyTokens (no proxy token) — a proxy secret must
+    // never authenticate here.
+    const restApp = appFor(service, "rest", {
+      legacyTokens: new Map([["api-tok", "lxc200"]]),
+    });
+    expect((await callWhoami(restApp, "some-proxy-secret")).status).toBe(401);
   });
 });

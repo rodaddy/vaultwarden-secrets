@@ -15,8 +15,12 @@ StateDirectoryMode=0700
 # Explicit PATH/HOME — systemd minimal PATH breaks bw at /usr/local/bin/bw.
 Environment=HOME=/var/lib/vaultwarden-secrets
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# State paths pinned into StateDirectory (DEP-3/DEP-6).
 Environment=VW_STATE_DIR=/var/lib/vaultwarden-secrets/state
+Environment=VAULTWARDEN_SECRETS_DIR=/var/lib/vaultwarden-secrets/config
 Environment=BW_SESSION_FILE=/var/lib/vaultwarden-secrets/.bw-session
+Environment=MASTER_KEY_FILE=/var/lib/vaultwarden-secrets/.master-key
+Environment=AUDIT_LOG_FILE=/var/lib/vaultwarden-secrets/audit.log
 Environment=PROXY_PORT=3003
 EnvironmentFile=-/opt/vaultwarden-secrets/.env.cred-proxy
 

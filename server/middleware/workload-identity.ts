@@ -9,7 +9,13 @@
  *   1. New opaque workload token (`vwsk_<id>_<random>`) → verified against the
  *      identity service for the required audience. Sets clientId = subject.
  *   2. Legacy bearer token (API_TOKEN_<CLIENT>) → subject "legacy:<client>".
+ *      Scoped per interface: REST + MCP only (never the proxy).
  *   3. Legacy PROXY_TOKEN (proxy audience only) → subject "legacy:proxy".
+ *      Never cross-honored on REST/MCP.
+ *
+ * Kill-switch (SEC-2): VW_LEGACY_TOKENS=off disables ALL legacy acceptance —
+ * only new vwsk_ tokens authenticate. Any other value (or unset) keeps legacy
+ * acceptance enabled for the migration window.
  *
  * clientId is set on the context EXACTLY like bearer-auth does, so downstream
  * folder-scoping and audit logging keep working unchanged.
@@ -21,6 +27,11 @@
 
 import type { Context, Next } from "hono";
 import { getIdentityService, type IdentityService } from "../identity/identity";
+
+/** SEC-2 kill-switch: true unless VW_LEGACY_TOKENS is explicitly "off". */
+export function legacyTokensEnabled(): boolean {
+  return (process.env.VW_LEGACY_TOKENS ?? "").toLowerCase() !== "off";
+}
 
 export interface WorkloadIdentityConfig {
   /** Required audience for this interface: "rest" | "mcp" | "proxy". */
@@ -52,19 +63,22 @@ export async function resolveIdentity(
 
   const service = config.service ?? getIdentityService();
 
-  // 1. New opaque workload token.
+  // 1. New opaque workload token (always accepted).
   if (token.startsWith("vwsk_")) {
     const identity = await service.verifyToken(token, config.audience);
     return identity ? identity.subject : null;
   }
 
-  // 2. Legacy per-client bearer tokens.
+  // Legacy acceptance is disabled entirely by the kill-switch (SEC-2).
+  if (!legacyTokensEnabled()) return null;
+
+  // 2. Legacy per-client bearer tokens (REST + MCP interfaces only).
   if (config.legacyTokens) {
     const client = config.legacyTokens.get(token);
     if (client) return `legacy:${client}`;
   }
 
-  // 3. Legacy proxy shared token.
+  // 3. Legacy proxy shared token (proxy interface only).
   if (config.legacyProxyToken && token === config.legacyProxyToken) {
     return "legacy:proxy";
   }

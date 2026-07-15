@@ -10,10 +10,18 @@
  * config alias) — never a hardcoded IP in committed files. Output is redacted:
  * no secrets, no token values, no full env dumps.
  *
+ * Liveness is part of drift (DEP-5): a check that reported "no drift" while MCP
+ * was down would be worse than useless. This tool REQUIRES, for the declared
+ * long-running units, that they are `systemctl is-active`, that MCP is listening
+ * on 3001, that each effective ExecStart matches the declared unit, and that the
+ * MCP probe returns HEALTHY (or AUTH_ENFORCED only when --allow-auth-enforced
+ * is passed). Any miss is drift and exits nonzero.
+ *
  * Exit codes: 0 = no drift, 1 = drift detected, 2 = usage/connection error.
  *
  * Usage:
  *   VW_DEPLOY_HOST=root@myhost bun run scripts/drift-check.ts
+ *   VW_DEPLOY_HOST=root@myhost bun run scripts/drift-check.ts --allow-auth-enforced
  *
  * @module scripts/drift-check
  */
@@ -25,12 +33,23 @@ import { $ } from "bun";
 const SYSTEMD_DIR = join(import.meta.dir, "..", "deploy", "systemd");
 const REMOTE_UNIT_DIR = "/etc/systemd/system";
 const STATE_PATH = "/var/lib/vaultwarden-secrets";
+const MCP_UNIT = "vaultwarden-secrets-mcp.service";
+const MCP_PORT = "3001";
 const ALLOWED_PORTS = new Set(["3000", "3001", "3003"]);
+const ALLOW_AUTH_ENFORCED = process.argv.includes("--allow-auth-enforced");
+
 const RUNTIME_SERVICES = [
   "vaultwarden-secrets.service",
   "vaultwarden-secrets-mcp.service",
   "vw-cred-proxy.service",
   "vw-snapshot.service",
+];
+
+/** Long-running services that MUST be active (snapshot is a oneshot — excluded). */
+const ACTIVE_SERVICES = [
+  "vaultwarden-secrets.service",
+  "vaultwarden-secrets-mcp.service",
+  "vw-cred-proxy.service",
 ];
 
 interface Finding {
@@ -190,10 +209,15 @@ async function main() {
   await checkListeners(target);
   await checkServiceUser(target);
   await checkStatePerms(target);
+  // DEP-5: liveness is drift.
+  await checkActive(target);
+  await checkExecStart(target);
+  await checkMcpListener(target);
+  await checkMcpProbe(target);
 
   if (findings.length === 0) {
     console.log(
-      "OK: no drift detected (units, listeners, identity, state-path).",
+      "OK: no drift detected (units, listeners, identity, state-path, liveness).",
     );
     process.exit(0);
   }

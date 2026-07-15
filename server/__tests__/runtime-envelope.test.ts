@@ -101,6 +101,27 @@ describe("runtime envelope: systemd units", () => {
         // bw lives at /usr/local/bin — its parent must be on PATH.
         expect(content).toMatch(/Environment=PATH=[^\n]*\/usr\/local\/bin/);
       });
+
+      it(`${svc} pins state paths into StateDirectory (DEP-3/DEP-6)`, () => {
+        const content = read(svc);
+        // Session, master key, config dir, and audit log all live under the
+        // owner-only state dir — never /root or a HOME-derived default.
+        expect(content).toMatch(
+          /Environment=BW_SESSION_FILE=\/var\/lib\/vaultwarden-secrets\//,
+        );
+        expect(content).toMatch(
+          /Environment=MASTER_KEY_FILE=\/var\/lib\/vaultwarden-secrets\//,
+        );
+        expect(content).toMatch(
+          /Environment=VAULTWARDEN_SECRETS_DIR=\/var\/lib\/vaultwarden-secrets\//,
+        );
+        expect(content).toMatch(
+          /Environment=AUDIT_LOG_FILE=\/var\/lib\/vaultwarden-secrets\//,
+        );
+        // Audit log must NOT default under /var/log (unwritable under
+        // ProtectSystem=strict).
+        expect(content).not.toMatch(/AUDIT_LOG_FILE=\/var\/log/);
+      });
     }
   });
 

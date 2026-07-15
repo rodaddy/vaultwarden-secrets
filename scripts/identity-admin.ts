@@ -16,7 +16,31 @@
  * @module scripts/identity-admin
  */
 
+import { join } from "node:path";
 import { getIdentityService } from "../server/identity/identity";
+import { resolveStateDir } from "../server/identity/store";
+
+/**
+ * Print the resolved store path on every run (DEP-4) so the operator can see
+ * exactly which store they are mutating, and warn loudly when VW_STATE_DIR is
+ * unset (the CLI is then hitting the per-user default, NOT the service store at
+ * /var/lib/vaultwarden-secrets/state).
+ */
+function reportStorePath(): void {
+  const dir = resolveStateDir();
+  const file = join(dir, "identities.json");
+  const usingDefault =
+    !process.env.VW_STATE_DIR || process.env.VW_STATE_DIR.trim().length === 0;
+  console.error(`store: ${file}`);
+  if (usingDefault) {
+    console.error(
+      "warning: VW_STATE_DIR is unset — using the per-user default store, " +
+        "NOT the service store. To target the service store, run:\n" +
+        "  sudo -u vwsecrets env VW_STATE_DIR=/var/lib/vaultwarden-secrets/state \\\n" +
+        "    bun run scripts/identity-admin.ts <cmd> ...",
+    );
+  }
+}
 
 interface Args {
   _: string[];
@@ -57,6 +81,7 @@ function usage(): never {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0];
+  reportStorePath();
   const service = getIdentityService();
 
   switch (cmd) {

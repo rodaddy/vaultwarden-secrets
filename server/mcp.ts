@@ -788,7 +788,7 @@ console.log("");
 
 // Encrypted ingress (issue #14): TLS when configured; fail-closed under
 // VW_REQUIRE_TLS=1. Must not change the MCP contract/port (still MCP_PORT).
-const tls = resolveIngressTls("mcp");
+const tls = resolveIngressTls("mcp", profile.tls);
 
 export default {
   port,
