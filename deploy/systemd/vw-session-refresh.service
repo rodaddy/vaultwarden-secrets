@@ -1,0 +1,31 @@
+[Unit]
+Description=Refresh Bitwarden session token
+After=network.target
+
+[Service]
+Type=oneshot
+# Dedicated non-root service identity (issue #14).
+User=mcp2cli
+Group=ai-services
+WorkingDirectory=/opt/vaultwarden-secrets
+
+StateDirectory=vaultwarden-secrets
+StateDirectoryMode=0700
+
+# Explicit PATH/HOME — systemd minimal PATH breaks bw at /usr/local/bin/bw, and
+# bw resolves its appdata (data.json) from HOME. Both must point at the
+# service-owned state dir, not root's HOME.
+Environment=HOME=/var/lib/vaultwarden-secrets
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=BW_SESSION_FILE=/var/lib/vaultwarden-secrets/.bw-session
+Environment=VW_ENV_FILE=/opt/vaultwarden-secrets/.env
+EnvironmentFile=-/opt/vaultwarden-secrets/.env
+
+ExecStart=/opt/vaultwarden-secrets/deploy/refresh-session.sh
+
+# Hardening (issue #14)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/vaultwarden-secrets
