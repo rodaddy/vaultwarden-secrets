@@ -11,6 +11,7 @@
  * - list_secrets: List available secrets with optional filter
  * - snapshot_info: Get vault snapshot metadata (age, item count, staleness)
  * - get_service: Get all vault items for a multi-host service
+ * - get_credential: Smart single-call credential lookup (exact + fuzzy + all fields)
  *
  * Tools (write — gated by SecurityProfile.allowWrites):
  * - refresh_snapshot: Force snapshot refresh from vault
@@ -32,9 +33,11 @@ import { snapshotManager, type BitwVaultItem } from "../snapshot";
 import { getVaultSession } from "../keychain";
 import { loadBearerTokens } from "./middleware/bearer-auth";
 import { resolveIdentity } from "./middleware/workload-identity";
+import { loadDenyFields, filterDeniedFields } from "./utils/folder-scope";
 import { resolveIngressTls } from "./utils/tls";
 import { getProfile } from "./profiles";
 import { resolveService } from "./service-resolver";
+import { resolveCredential } from "./credential-resolver";
 import {
   buildCreateTemplate,
   mergeUpdateFields,
@@ -139,6 +142,7 @@ async function initProfileFolderScope(): Promise<void> {
 }
 
 await initProfileFolderScope();
+loadDenyFields();
 
 /** Check if an item is in an allowed folder */
 function isItemAllowed(item: BitwVaultItem): boolean {
@@ -352,7 +356,10 @@ function createMcpServer(subject: string): McpServer {
             `Error: Secret "${name}" not found or not in allowed folder scope`,
           );
 
-        const fields = await getSecretObject(name, { vault });
+        const fields = filterDeniedFields(
+          subject,
+          await getSecretObject(name, { vault }),
+        );
         return json(fields);
       } catch (error) {
         return err(
@@ -431,6 +438,49 @@ function createMcpServer(subject: string): McpServer {
         }
 
         return json(result);
+      } catch (error) {
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+  );
+
+  server.tool(
+    "get_credential",
+    "Smart single-call credential lookup. Tries exact name match first, falls back to fuzzy search. Returns value, all fields, and item metadata in one response. Use this instead of chaining search_secrets -> get_secret_fields -> get_secret.",
+    {
+      query: z
+        .string()
+        .describe(
+          'Secret name (exact) or search term (fuzzy). Examples: "n8n local", "grafana", "PostgreSQL n8n-ops"',
+        ),
+      field: z
+        .string()
+        .optional()
+        .describe(
+          'Specific field to extract (e.g. "login.password", "login.username", "notes"). Omit to get all fields.',
+        ),
+      vault: z.string().optional().describe('Vault ID (default: "default")'),
+    },
+    { readOnlyHint: true },
+    async ({ query, field, vault }) => {
+      try {
+        // Pure resolution (exact→fuzzy→deny/scope) via credential-resolver;
+        // this adapter supplies the real scope-aware vault I/O closures.
+        const outcome = await resolveCredential(query, field, {
+          findScoped: async (name) => {
+            const item = await findScopedItem(name);
+            return item ? item.name : null;
+          },
+          listScoped: async () =>
+            filterByScope(await listSecrets(undefined, { vault })),
+          getSecret: (path) => getSecret(path, { vault }),
+          getSecretObject: (name) => getSecretObject(name, { vault }),
+          filterDenied: (obj) => filterDeniedFields(subject, obj),
+        });
+        if (!outcome.ok) return err(outcome.error);
+        return json(outcome.value);
       } catch (error) {
         return err(
           `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -767,6 +817,7 @@ function createMcpServer(subject: string): McpServer {
     "list_secrets",
     "snapshot_info",
     "get_service",
+    "get_credential",
     ...(profile.allowWrites
       ? [
           "refresh_snapshot",

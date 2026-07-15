@@ -10,6 +10,29 @@ import { $ } from "bun";
 import { getVaultSession } from "../../keychain";
 import { getActiveVault } from "../../index";
 
+/**
+ * Normalize a subject/clientId to the canonical scope key.
+ *
+ * SECURITY (F4): the workload-identity middleware sets clientId `legacy:<client>`
+ * for legacy bearer tokens, but env-derived scopes (API_FOLDERS_<CLIENT>,
+ * API_DENY_FIELDS_<CLIENT>) are keyed as `<client>` lowercased. Without this
+ * normalization a scoped legacy token (`legacy:payroll`) misses the map. For a
+ * folder scope that is a fail-OPEN read (treated as unrestricted); for a field
+ * DENY it is a fail-OPEN leak (the deny silently doesn't apply). Stripping the
+ * `legacy:` prefix (repeatedly, so `legacy:legacy:x` == `x`, F4 P2) and
+ * lowercasing makes every env-keyed lookup match the middleware's subject.
+ *
+ * Shared by BOTH FolderScope (folder allow-list) and the field-deny map so
+ * there is exactly one normalization for all env-keyed access decisions.
+ */
+export function scopeKey(clientId: string): string {
+  let stripped = clientId;
+  while (stripped.startsWith("legacy:")) {
+    stripped = stripped.slice("legacy:".length);
+  }
+  return stripped.toLowerCase();
+}
+
 export class FolderScope {
   /** folder name (lowercase) → VW folder ID */
   private folderNameToId = new Map<string, string>();
@@ -148,13 +171,7 @@ export class FolderScope {
    * scope and stays unrestricted.
    */
   private scopeKey(clientId: string): string {
-    // Strip the `legacy:` prefix defensively — repeatedly — so a malformed
-    // subject like `legacy:legacy:x` cannot key differently from `x` (F4 P2).
-    let stripped = clientId;
-    while (stripped.startsWith("legacy:")) {
-      stripped = stripped.slice("legacy:".length);
-    }
-    return stripped.toLowerCase();
+    return scopeKey(clientId);
   }
 
   /**
@@ -239,4 +256,65 @@ export function loadFolderScopes(): Map<string, string[]> {
   }
 
   return scopes;
+}
+
+// ============================================================================
+// Field-level deny (per-client)
+// ============================================================================
+
+/** scopeKey(clientId) → Set of denied field names */
+const clientDeniedFields = new Map<string, Set<string>>();
+
+/**
+ * Load per-client denied fields from environment variables.
+ * Format: API_DENY_FIELDS_<CLIENT>=field1,field2
+ *
+ * SECURITY (F4): the map is keyed by {@link scopeKey}, the SAME normalization
+ * FolderScope uses, so an env rule API_DENY_FIELDS_PAYROLL is stored under
+ * `payroll` and later matched for a `legacy:payroll` subject. Keying by the raw
+ * client name (the old WIP behavior) would miss legacy subjects and fail OPEN —
+ * the denied field would silently leak.
+ */
+export function loadDenyFields(): void {
+  clientDeniedFields.clear();
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("API_DENY_FIELDS_") && value) {
+      const clientId = scopeKey(key.replace("API_DENY_FIELDS_", ""));
+      const fields = new Set(
+        value
+          .split(",")
+          .map((f) => f.trim())
+          .filter(Boolean),
+      );
+      if (fields.size > 0) {
+        clientDeniedFields.set(clientId, fields);
+        console.log(`  ✓ Field Deny: ${clientId} → ${[...fields].join(", ")}`);
+      }
+    }
+  }
+}
+
+/**
+ * Strip denied fields from a result object for a given client. Returns a new
+ * object with denied fields removed. No-op if the client has no deny rules.
+ *
+ * SECURITY (F4): the lookup normalizes `clientId` via {@link scopeKey} so a
+ * `legacy:<client>` subject matches the rule stored for `<client>`. Reverting
+ * this to a raw lookup makes the deny fail OPEN for legacy subjects.
+ */
+export function filterDeniedFields<T extends Record<string, unknown>>(
+  clientId: string,
+  obj: T,
+): T {
+  const denied = clientDeniedFields.get(scopeKey(clientId));
+  if (!denied || denied.size === 0) return obj;
+
+  const filtered = { ...obj };
+  for (const field of denied) {
+    if (field in filtered) {
+      delete filtered[field];
+    }
+  }
+  return filtered;
 }
