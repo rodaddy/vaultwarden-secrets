@@ -43,28 +43,43 @@ bun test server/__tests__/mcp-contract.test.ts
 **Pass:** `0 fail`. **Fail action:** abort; the candidate diverges from the
 frozen contract — fix the candidate, do not weaken the test.
 
-### Gate P2 — Baseline probe healthy
+### Gate P2 — Baseline probe HEALTHY (with token)
 
-The current live service answers `initialize` + `tools/list`.
+The current live service must answer `initialize` + `tools/list` **with a valid
+token**. This gate requires `HEALTHY` — `AUTH_ENFORCED` (no token) is NOT
+sufficient, because it only proves the auth layer rejects anonymous callers, not
+that the tool contract is served.
 
 ```sh
+# VW_MCP_TOKEN must be set (shell only). The probe exits 0 ONLY on HEALTHY.
 VW_MCP_BASE_URL="$VW_MCP_BASE_URL" VW_MCP_TOKEN="$VW_MCP_TOKEN" bun scripts/mcp-probe.ts
-echo "exit=$?"
 ```
 
-**Pass:** exit `0` with `"status":"HEALTHY"` and `"toolCount"` matching the
-baseline (10 under `im-aware`), **or** `"status":"AUTH_ENFORCED"` if run without
-a token (proves the auth layer is up). **Fail action:** abort; the current
-service is unhealthy — investigate before introducing a candidate.
+Read the **exit code** (`$?`) on its own line, never appended after the command
+(a trailing `; echo ...` on the same line would mask the probe's exit code):
+
+```sh
+status=$?
+test "$status" -eq 0   # HEALTHY required; any nonzero fails the gate
+```
+
+**Pass:** exit `0` and `"status":"HEALTHY"` with `"toolCount"` matching the
+baseline (10 under `im-aware`). **Fail action:** abort; the current service is
+unhealthy or the token is wrong — investigate before introducing a candidate.
 
 Exit-code contract (from `scripts/mcp-probe.ts`):
 
 | Exit | Meaning |
 |---|---|
-| 0 | `HEALTHY` or `AUTH_ENFORCED` |
+| 0 | `HEALTHY` (also `AUTH_ENFORCED` **only** when `--allow-auth-enforced` is passed) |
 | 2 | `UNHEALTHY` (reachable but handshake/list failed) |
 | 3 | `UNREACHABLE` (connection/timeout/DNS) |
 | 4 | `CONFIG_ERROR` (bad/missing `VW_MCP_BASE_URL`) |
+| 5 | `AUTH_ENFORCED` (no token; auth is up but contract not verified) |
+
+> A dedicated auth-liveness check (no token) may use
+> `bun scripts/mcp-probe.ts --allow-auth-enforced` to accept `AUTH_ENFORCED`
+> as exit 0. Do **not** use that flag for P2/P4/C3, which require `HEALTHY`.
 
 ### Gate P3 — Required timers active
 
@@ -79,14 +94,15 @@ ssh root@<production-host> \
 **Pass:** three lines of `active`. **Fail action:** abort; a lapsed timer means
 stale snapshots or a locked vault session, which the candidate would inherit.
 
-### Gate P4 — Candidate probe healthy
+### Gate P4 — Candidate probe HEALTHY (with token)
 
 Bring the candidate up on a **separate port** (never replacing 3001 yet) and
-probe it.
+probe it **with a token**. Like P2, this gate requires `HEALTHY`.
 
 ```sh
 VW_MCP_BASE_URL="$VW_CANDIDATE_URL" VW_MCP_TOKEN="$VW_CANDIDATE_TOKEN" bun scripts/mcp-probe.ts
-echo "exit=$?"
+status=$?
+test "$status" -eq 0
 ```
 
 **Pass:** exit `0`, `"status":"HEALTHY"`, `toolCount` equal to the baseline.
@@ -121,28 +137,50 @@ redacted per-op hashes. Do **not** stop the 3001 service.
 
 ### Gate C2 — Promote candidate to port 3001 (atomic, reversible)
 
-Only after C1 passes. The service unit is the single switch point; keep the
-previous unit/port reachable until C3 confirms health.
+Only after C1 passes. The service unit is the single switch point.
+
+**Step 1 — capture the rollback anchor before touching anything.** Persist the
+currently-deployed commit to a file on the host so R1 has an exact revision to
+restore (never rely on shell scrollback):
 
 ```sh
-# On the production host — record current state first (rollback anchor):
-ssh root@<production-host> 'systemctl status vaultwarden-secrets-mcp.service --no-pager | head -5'
-
-# Promote the candidate (deploy the new revision, then restart the unit):
-ssh root@<production-host> 'systemctl restart vaultwarden-secrets-mcp.service'
+ssh root@<production-host> '
+  git -C /opt/vaultwarden-secrets rev-parse HEAD > /root/vw-rollback-anchor &&
+  echo "rollback anchor: $(cat /root/vw-rollback-anchor)"
+'
 ```
 
-**Do not** `stop` the service and leave it down; `restart` minimizes the window.
-If the candidate cannot bind 3001, systemd `Restart=on-failure` and the rollback
-(R1) restore the prior revision.
+**Step 2 — deploy the candidate revision and promote it via a unit restart.**
+The `im-aware` unit is `vaultwarden-secrets-mcp.service` (runs
+`bun run server/mcp.ts` on port 3001). Promotion is: fetch/checkout the
+candidate revision, then `restart` the unit — a `restart` re-execs in place and
+does **not** leave the service stopped:
+
+```sh
+ssh root@<production-host> '
+  cd /opt/vaultwarden-secrets &&
+  git fetch --all --quiet &&
+  git checkout "<candidate-revision>" &&
+  systemctl restart vaultwarden-secrets-mcp.service
+'
+```
+
+**Never** `systemctl stop` the active unit and leave it down while staging the
+replacement — the fail-closed rule requires the active contract to keep serving
+until the replacement's health is proven (C3). If the candidate cannot bind
+3001, systemd `Restart=on-failure` retries and rollback R1 restores the anchor.
+If the candidate ships as a **separate unit**, enable/start it and confirm it is
+healthy (C3) before `systemctl disable --now` on the old unit — again, old never
+stops first.
 
 ### Gate C3 — Post-promotion probe on 3001
 
-Immediately re-probe the canonical endpoint.
+Immediately re-probe the canonical endpoint **with a token** (requires HEALTHY):
 
 ```sh
 VW_MCP_BASE_URL="$VW_MCP_BASE_URL" VW_MCP_TOKEN="$VW_MCP_TOKEN" bun scripts/mcp-probe.ts
-echo "exit=$?"
+status=$?          # read on its own line — do not append `; echo` and mask it
+test "$status" -eq 0
 ```
 
 **Pass:** exit `0`, `"status":"HEALTHY"`, `toolCount` unchanged. **Fail action:**
@@ -166,18 +204,21 @@ ssh root@<production-host> 'systemctl is-active vw-snapshot.timer vw-session-ref
 Preconditions to *start* rollback: C3 or C4 failed, **or** any post-cutover probe
 returns non-zero.
 
+Restore the exact revision captured by the C2 rollback anchor
+(`/root/vw-rollback-anchor`), then restart the unit in place:
+
 ```sh
-# Restore the previous code revision (the promotion left the prior commit tagged
-# or the prior unit available), then restart:
 ssh root@<production-host> '
+  set -e
+  test -s /root/vw-rollback-anchor || { echo "MISSING rollback anchor — abort"; exit 1; }
   cd /opt/vaultwarden-secrets &&
-  git checkout <previous-revision> &&
+  git checkout "$(cat /root/vw-rollback-anchor)" &&
   systemctl restart vaultwarden-secrets-mcp.service
 '
 ```
 
-Then re-run **Gate C3** (probe) and **Gate P1** (contract tests) against the
-restored service.
+Then re-run **Gate C3** (probe, HEALTHY with token) and **Gate P1** (contract
+tests) against the restored service.
 
 **Rollback is only complete when:**
 
@@ -189,7 +230,7 @@ restored service.
 ### Fail-closed invariants (must hold at every step)
 
 - The active 3001 service is **never stopped** before a healthy replacement is
-  proven (C1 shadow clean + C4 candidate probe healthy).
+  proven (P4 candidate probe HEALTHY + C1 shadow clean).
 - Auth is never disabled or loosened to make a gate pass — an unauthorized
   request must still return `401 { "error": "Unauthorized" }`.
 - No gate command prints a secret value, item name, token, or IP. The shadow
@@ -206,20 +247,37 @@ Rehearse the full sequence against a **candidate on a scratch port** without
 touching 3001. This is the pre-cutover rehearsal referenced by #23's validation:
 
 ```sh
-# 1. Preconditions
+# 1. Preconditions (both probes require HEALTHY, so pass tokens)
 bun test server/__tests__/mcp-contract.test.ts
-VW_MCP_BASE_URL="$VW_MCP_BASE_URL"     bun scripts/mcp-probe.ts     # P2 (baseline)
+
+VW_MCP_BASE_URL="$VW_MCP_BASE_URL" VW_MCP_TOKEN="$VW_MCP_TOKEN" \
+  bun scripts/mcp-probe.ts                                          # P2 (baseline)
+test $? -eq 0
+
 VW_MCP_BASE_URL="$VW_CANDIDATE_URL" VW_MCP_TOKEN="$VW_CANDIDATE_TOKEN" \
   bun scripts/mcp-probe.ts                                          # P4 (candidate)
+test $? -eq 0
 
 # 2. Shadow check N times (C1) — no service is stopped
-N=20 bash -c '...C1 loop above...'
+N="${N:-20}"
+fails=0
+for i in $(seq 1 "$N"); do
+  VW_BASELINE_URL="$VW_MCP_BASE_URL" VW_CANDIDATE_URL="$VW_CANDIDATE_URL" \
+  VW_BASELINE_TOKEN="$VW_BASELINE_TOKEN" VW_CANDIDATE_TOKEN="$VW_CANDIDATE_TOKEN" \
+    bun scripts/mcp-shadow-check.ts >/dev/null 2>&1 || fails=$((fails+1))
+done
+echo "shadow: $fails / $N diverged"
+test "$fails" -eq 0
 
-# 3. Rollback rehearsal: confirm the restore command set is correct WITHOUT
-#    promoting — i.e. verify the previous-revision anchor exists.
-ssh root@<production-host> 'cd /opt/vaultwarden-secrets && git rev-parse HEAD'
+# 3. Rollback rehearsal: capture the anchor WITHOUT promoting, and confirm the
+#    exact revision it would restore is reachable.
+ssh root@<production-host> '
+  git -C /opt/vaultwarden-secrets rev-parse HEAD > /root/vw-rollback-anchor &&
+  git -C /opt/vaultwarden-secrets cat-file -e "$(cat /root/vw-rollback-anchor)^{commit}" &&
+  echo "anchor OK: $(cat /root/vw-rollback-anchor)"
+'
 ```
 
-A green dry run (contract tests pass, both probes healthy, `0/N` shadow
-divergence, rollback anchor confirmed) is the go/no-go signal for the real
-cutover in #22.
+A green dry run (contract tests pass, both probes `HEALTHY` with token, `0/N`
+shadow divergence, rollback anchor captured and reachable) is the go/no-go
+signal for the real cutover in #22.
