@@ -56,7 +56,7 @@ RETIRED_UNIT="vw-deploy-webhook.service"
 RETIRED_UNIT_PATH="$SYSTEMD_DIR/$RETIRED_UNIT"
 # Service identity referenced by preflight. Provisioned UPSTREAM; this repo only
 # references it and fails closed (preflight) if it is absent.
-VW_SERVICE_USER="${VW_SERVICE_USER:-vaultwarden-secrets}"
+VW_SERVICE_USER="${VW_SERVICE_USER:-mcp2cli}"
 # Operator's read-only GitHub deploy key — NOT root's. Configurable so the same
 # script works for any operator identity; defaults under the operator's HOME.
 VW_DEPLOY_SSH_KEY="${VW_DEPLOY_SSH_KEY:-${HOME:-/home/rico}/.ssh/id_ed25519_github}"
@@ -164,7 +164,7 @@ preflight_unit() {
   _ok=0
 
   # 1. Required service user must exist. The unit's User= is authoritative; it
-  #    should be VW_SERVICE_USER (default vaultwarden-secrets), which is
+  #    should be VW_SERVICE_USER (default mcp2cli), which is
   #    provisioned UPSTREAM (TN01/rtech-infra), never by this repo. Fail closed
   #    if it is absent — this repo only REFERENCES the account.
   _user=$(unit_get "$_unit" "User" | head -n1)
