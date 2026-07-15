@@ -100,18 +100,27 @@ preflight_unit() {
     fi
   done
 
-  # 3. Non-optional EnvironmentFile (no leading '-') must be present.
+  # 3. Non-optional EnvironmentFile (no leading '-') must be present AND
+  #    readable by the unit's User= (same sudo -u / test -r pattern as the
+  #    state/session/key checks). Optional files (leading '-') tolerate absence,
+  #    but if present must still be readable.
   unit_get "$_unit" "EnvironmentFile" | while IFS= read -r _ef; do
     [ -n "$_ef" ] || continue
+    _optional=0
     case "$_ef" in
-      -*) : ;; # optional (leading dash) — absence tolerated
-      *)
-        if [ ! -f "$_ef" ]; then
-          err "$_name: required EnvironmentFile missing: $_ef"
-          echo "fail" >> "${_PREFLIGHT_FAIL_MARK:-/dev/null}"
-        fi
-        ;;
+      -*) _optional=1; _ef=${_ef#-} ;; # strip the optional marker
     esac
+    if [ ! -f "$_ef" ]; then
+      if [ "$_optional" -eq 0 ]; then
+        err "$_name: required EnvironmentFile missing: $_ef"
+        echo "fail" >> "${_PREFLIGHT_FAIL_MARK:-/dev/null}"
+      fi
+      continue # optional + absent is fine; nothing to read-check
+    fi
+    if [ -n "$_user" ] && [ "$_user" != "root" ] && ! readable_by "$_user" "$_ef"; then
+      err "$_name: EnvironmentFile not readable by $_user: $_ef"
+      echo "fail" >> "${_PREFLIGHT_FAIL_MARK:-/dev/null}"
+    fi
   done
 
   # 4. State dir + declared session/key files readable by the unit's user.
@@ -200,6 +209,11 @@ deploy_main() {
     exit 1
   fi
 
+  # Start each deploy with a clean backup dir so a stale backup from a prior
+  # deploy can never become a wrong restore source (DEP-2).
+  rm -rf "$BACKUP_DIR"
+  mkdir -p "$BACKUP_DIR"
+
   # Sync changed units, backing up the previous version first (DEP-2).
   _changed=0
   for unit in "$UNIT_SRC_DIR"/*.service; do
@@ -212,6 +226,18 @@ deploy_main() {
     fi
   done
   systemctl daemon-reload
+
+  # DEP-2: guarantee a restorable snapshot of the MCP unit BEFORE restarting it,
+  # whether or not its own content changed this deploy. Otherwise a failed
+  # health probe (e.g. MCP unchanged but another unit's change broke the runtime)
+  # would call restore_unit with no backup to restore. backup_unit overwrites the
+  # per-deploy backup, so if MCP *did* change above it was already backed up as
+  # its pre-change version — re-running here is a no-op refresh of that same
+  # source. Since the change-sync runs first, re-back-up only when we did NOT
+  # already capture it this deploy.
+  if [ ! -f "$BACKUP_DIR/$MCP_UNIT" ]; then
+    backup_unit "$MCP_UNIT"
+  fi
 
   # Restart the protected MCP unit (only ever stopped via its own restart), then
   # verify health; roll back on failure. Literal name kept for the retirement

@@ -110,6 +110,71 @@ write_unit "$OPTENV" "$TEST_USER" "$FAKE_BUN" "$SESSION_FILE" "$KEY_FILE" \
 rc=0; preflight_unit_checked "$OPTENV" || rc=$?
 check "absent OPTIONAL EnvironmentFile still passes" 0 "$rc"
 
+# --- Case 7: present-but-UNREADABLE EnvironmentFile → FAIL (DEP-1 residual) --
+# The required EnvironmentFile exists but is not readable by User=. Preflight
+# must fail closed rather than accept it on existence alone.
+UNREADABLE_ENV="$FAKE_ROOT/unreadable.env"
+: > "$UNREADABLE_ENV"
+chmod 000 "$UNREADABLE_ENV"
+if [ -r "$UNREADABLE_ENV" ]; then
+  # Running as root (or a filesystem that ignores the read bit) — chmod 000 is
+  # still readable, so this branch cannot be exercised meaningfully. Skip.
+  echo "  skip: unreadable-EnvironmentFile branch (reader bypasses mode bits)"
+else
+  BADREAD="$UNIT_DIR/badread.service"
+  write_unit "$BADREAD" "$TEST_USER" "$FAKE_BUN" "$SESSION_FILE" "$KEY_FILE" \
+    "EnvironmentFile=$UNREADABLE_ENV"
+  rc=0; preflight_unit_checked "$BADREAD" || rc=$?
+  check "present-but-unreadable EnvironmentFile fails preflight" 1 "$rc"
+fi
+chmod 644 "$UNREADABLE_ENV" 2>/dev/null || true
+
+# --- Case 8: MCP unit UNCHANGED, restart fails → live unit restored + nonzero -
+# (DEP-2 residual) Guarantees a restorable snapshot exists before restart even
+# when MCP content did not change this deploy, so a failed health probe can
+# always restore the live unit and exit nonzero.
+D2_ROOT=$(mktemp -d)
+D2_SYSTEMD="$D2_ROOT/systemd"
+D2_BACKUP="$D2_SYSTEMD/.vw-backup"
+mkdir -p "$D2_SYSTEMD"
+
+# The live (known-good) MCP unit, byte-identical to the repo source (unchanged).
+LIVE_MARKER="# live-known-good-$(date +%s)"
+printf '%s\n[Service]\nExecStart=/usr/local/bin/bun run server/mcp.ts\n' \
+  "$LIVE_MARKER" > "$D2_SYSTEMD/$MCP_UNIT"
+
+# Simulate the DEP-2 pre-restart guarantee: no backup captured yet this deploy
+# (MCP unchanged), so the script backs up the current live unit unconditionally.
+(
+  # Re-scope the backup/systemd dirs to the D2 fake root for the real functions.
+  SYSTEMD_DIR="$D2_SYSTEMD"
+  BACKUP_DIR="$D2_BACKUP"
+  rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+
+  # Guard identical to deploy_main: back up MCP if not already captured.
+  if [ ! -f "$BACKUP_DIR/$MCP_UNIT" ]; then
+    backup_unit "$MCP_UNIT" >/dev/null
+  fi
+
+  # Now simulate a broken restart: overwrite the live unit (as if a bad
+  # daemon-reload/other-unit change left MCP unhealthy) and fail the probe.
+  printf '# BROKEN\n' > "$SYSTEMD_DIR/$MCP_UNIT"
+
+  # Health probe fails → restore must have a source and re-verify.
+  if restore_unit "$MCP_UNIT" >/dev/null; then
+    # Verify the restored file is the known-good live content, not the broken one.
+    if grep -q "$LIVE_MARKER" "$SYSTEMD_DIR/$MCP_UNIT"; then
+      exit 0
+    fi
+    exit 3
+  fi
+  # No backup to restore — the exact failure DEP-2 residual is fixing.
+  exit 2
+)
+rc=$?
+check "DEP-2: unchanged-MCP restart failure restores live unit" 0 "$rc"
+rm -rf "$D2_ROOT"
+
 echo ""
 echo "preflight.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
