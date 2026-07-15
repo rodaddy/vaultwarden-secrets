@@ -3,7 +3,7 @@ import type { BitwVaultItem } from "../../snapshot";
 import { resolveService } from "../service-resolver";
 
 function makeItem(
-  overrides: Partial<BitwVaultItem> & { name: string }
+  overrides: Partial<BitwVaultItem> & { name: string },
 ): BitwVaultItem {
   return {
     id: crypto.randomUUID(),

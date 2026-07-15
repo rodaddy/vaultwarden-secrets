@@ -11,6 +11,7 @@
  * - list_secrets: List available secrets with optional filter
  * - snapshot_info: Get vault snapshot metadata (age, item count, staleness)
  * - get_service: Get all vault items for a multi-host service
+ * - get_credential: Smart single-call credential lookup (exact + fuzzy + all fields)
  *
  * Tools (write — gated by SecurityProfile.allowWrites):
  * - refresh_snapshot: Force snapshot refresh from vault
@@ -35,6 +36,7 @@ import { resolveIdentity } from "./middleware/workload-identity";
 import { resolveIngressTls } from "./utils/tls";
 import { getProfile } from "./profiles";
 import { resolveService } from "./service-resolver";
+import { resolveCredential } from "./credential-resolver";
 import {
   buildCreateTemplate,
   mergeUpdateFields,
@@ -239,6 +241,27 @@ const err = (msg: string) => ({
   isError: true as const,
 });
 
+/**
+ * SECURITY (vault-scope, P1): folder scope (allowedFolderIds / filterByScope /
+ * findScopedItem) is resolved ONLY against the DEFAULT vault's snapshot — there
+ * is no per-vault snapshot/scope infrastructure. A tool that accepts a `vault`
+ * param but scopes against the default snapshot would let a caller pass
+ * `vault:"other"` to satisfy the default-vault scope check and then read
+ * out-of-scope material from another vault. We therefore FAIL CLOSED: any
+ * non-default `vault` on a scope-enforced read tool is rejected. Returns an
+ * error result to short-circuit, or null when the vault is the default.
+ */
+function rejectNonDefaultVault(
+  vault: string | undefined,
+): ReturnType<typeof err> | null {
+  if (vault !== undefined && vault !== "default") {
+    return err(
+      `Error: cross-vault access is not supported; folder scope is enforced only for the default vault.`,
+    );
+  }
+  return null;
+}
+
 // ============================================================================
 // MCP Server factory
 // ============================================================================
@@ -270,6 +293,9 @@ function createMcpServer(subject: string): McpServer {
     { readOnlyHint: true },
     async ({ query, limit, vault }) => {
       try {
+        const vaultErr = rejectNonDefaultVault(vault);
+        if (vaultErr) return vaultErr;
+
         let secrets = await listSecrets(undefined, { vault });
         secrets = await filterByScope(secrets);
         const lowerQuery = query.toLowerCase();
@@ -319,6 +345,9 @@ function createMcpServer(subject: string): McpServer {
     { readOnlyHint: true },
     async ({ name, vault }) => {
       try {
+        const vaultErr = rejectNonDefaultVault(vault);
+        if (vaultErr) return vaultErr;
+
         const baseName = name.split(".")[0] || name;
         const item = await findScopedItem(baseName);
         if (!item)
@@ -346,6 +375,9 @@ function createMcpServer(subject: string): McpServer {
     { readOnlyHint: true },
     async ({ name, vault }) => {
       try {
+        const vaultErr = rejectNonDefaultVault(vault);
+        if (vaultErr) return vaultErr;
+
         const item = await findScopedItem(name);
         if (!item)
           return err(
@@ -375,6 +407,9 @@ function createMcpServer(subject: string): McpServer {
     { readOnlyHint: true },
     async ({ filter, vault }) => {
       try {
+        const vaultErr = rejectNonDefaultVault(vault);
+        if (vaultErr) return vaultErr;
+
         let secrets = await listSecrets(filter || undefined, { vault });
         secrets = await filterByScope(secrets);
         return json(secrets);
@@ -431,6 +466,54 @@ function createMcpServer(subject: string): McpServer {
         }
 
         return json(result);
+      } catch (error) {
+        return err(
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+  );
+
+  server.tool(
+    "get_credential",
+    "Smart single-call credential lookup. Tries exact name match first, falls back to fuzzy search. Returns value, all fields, and item metadata in one response. Use this instead of chaining search_secrets -> get_secret_fields -> get_secret.",
+    {
+      query: z
+        .string()
+        .describe(
+          'Secret name (exact) or search term (fuzzy). Examples: "n8n local", "grafana", "PostgreSQL n8n-ops"',
+        ),
+      field: z
+        .string()
+        .optional()
+        .describe(
+          'Specific field to extract (e.g. "login.password", "login.username", "notes"). Omit to get all fields.',
+        ),
+      vault: z.string().optional().describe('Vault ID (default: "default")'),
+    },
+    { readOnlyHint: true },
+    async ({ query, field, vault }) => {
+      try {
+        // SECURITY (P1): folder scope resolves only against the default vault's
+        // snapshot; reject any non-default vault (fail closed) so a caller can't
+        // pass vault:"other" to bypass the default-vault scope check.
+        const vaultErr = rejectNonDefaultVault(vault);
+        if (vaultErr) return vaultErr;
+
+        // Pure resolution (exact→fuzzy→scope) via credential-resolver; this
+        // adapter supplies the real scope-aware vault I/O closures.
+        const outcome = await resolveCredential(query, field, {
+          findScoped: async (name) => {
+            const item = await findScopedItem(name);
+            return item ? item.name : null;
+          },
+          listScoped: async () =>
+            filterByScope(await listSecrets(undefined, { vault })),
+          getSecret: (path) => getSecret(path, { vault }),
+          getSecretObject: (name) => getSecretObject(name, { vault }),
+        });
+        if (!outcome.ok) return err(outcome.error);
+        return json(outcome.value);
       } catch (error) {
         return err(
           `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -767,6 +850,7 @@ function createMcpServer(subject: string): McpServer {
     "list_secrets",
     "snapshot_info",
     "get_service",
+    "get_credential",
     ...(profile.allowWrites
       ? [
           "refresh_snapshot",

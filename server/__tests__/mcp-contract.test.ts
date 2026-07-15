@@ -146,7 +146,7 @@ afterAll(() => {
 
 // ---------------------------------------------------------------------------
 // Baseline: the frozen tool contract for SECURITY_PROFILE with allowWrites.
-// feeling-lucky exposes the full 11-tool superset (6 read + 5 write).
+// feeling-lucky exposes the full 12-tool superset (7 read + 5 write).
 // rotate_secret was added by the pilot cutover (#22): GCP-Secret-Manager-style
 // rotation driven through the control plane; additive, allowWrites-gated.
 // ---------------------------------------------------------------------------
@@ -158,6 +158,7 @@ const READ_TOOLS = [
   "list_secrets",
   "snapshot_info",
   "get_service",
+  "get_credential",
 ] as const;
 
 const WRITE_TOOLS = [
@@ -178,6 +179,7 @@ const REQUIRED_INPUT: Record<string, string[]> = {
   list_secrets: [],
   snapshot_info: [],
   get_service: ["service"],
+  get_credential: ["query"],
   refresh_snapshot: [],
   create_secret: ["name"],
   update_secret: ["name"],
@@ -290,6 +292,18 @@ const EXPECTED_TOOL_SCHEMAS: Record<string, unknown> = {
       type: "object",
       properties: { service: { type: "string" } },
       required: ["service"],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  get_credential: {
+    inputSchema: {
+      type: "object",
+      properties: {
+        field: { type: "string" },
+        query: { type: "string" },
+        vault: { type: "string" },
+      },
+      required: ["query"],
     },
     annotations: { readOnlyHint: true },
   },
@@ -436,7 +450,7 @@ describe("tools/list contract", () => {
     tools = res.body.result.tools;
   });
 
-  test("exposes exactly the 11 baseline tools", () => {
+  test("exposes exactly the 12 baseline tools", () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
   });
@@ -561,5 +575,76 @@ describe("read-tool response envelope", () => {
     expect(Array.isArray(result.content)).toBe(true);
     expect(result.content[0].type).toBe("text");
     expect(typeof result.content[0].text).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vault-scope fail-closed (P1): folder scope is enforced only for the default
+// vault's snapshot. Scope-enforced read tools MUST reject a non-default `vault`
+// so a caller can't pass vault:"other" to bypass the default-vault scope check
+// and read out-of-scope material. Falsifiable: removing rejectNonDefaultVault
+// makes these return the tool's normal (non-error) envelope.
+// ---------------------------------------------------------------------------
+
+describe("vault-scope fail-closed", () => {
+  let sid: string;
+  beforeAll(async () => {
+    sid = await initSession();
+  });
+
+  async function callWithOtherVault(
+    name: string,
+    args: Record<string, unknown>,
+  ) {
+    const res = await rpc(
+      "tools/call",
+      { name, arguments: { ...args, vault: "other" } },
+      sid,
+      AUTH_HEADERS,
+      30,
+    );
+    expect(res.status).toBe(200);
+    return res.body.result;
+  }
+
+  test("get_credential rejects a non-default vault", async () => {
+    const result = await callWithOtherVault("get_credential", {
+      query: "anything",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("cross-vault");
+  });
+
+  test("get_secret rejects a non-default vault", async () => {
+    const result = await callWithOtherVault("get_secret", { name: "anything" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("cross-vault");
+  });
+
+  test("get_secret_fields rejects a non-default vault", async () => {
+    const result = await callWithOtherVault("get_secret_fields", {
+      name: "anything",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("cross-vault");
+  });
+
+  test("default vault is NOT rejected by the vault guard (guards over-blocking)", async () => {
+    // With feeling-lucky + no snapshot, get_credential resolves to a normal
+    // not-found — NOT the cross-vault error. Proves the guard only blocks
+    // non-default vaults.
+    const res = await rpc(
+      "tools/call",
+      {
+        name: "get_credential",
+        arguments: { query: "zzzzz", vault: "default" },
+      },
+      sid,
+      AUTH_HEADERS,
+      31,
+    );
+    expect(res.status).toBe(200);
+    const text = res.body.result.content[0].text as string;
+    expect(text).not.toContain("cross-vault");
   });
 });

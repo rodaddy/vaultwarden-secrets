@@ -10,6 +10,31 @@ import { $ } from "bun";
 import { getVaultSession } from "../../keychain";
 import { getActiveVault } from "../../index";
 
+/**
+ * Normalize a subject/clientId to the canonical scope key.
+ *
+ * SECURITY (F4): the workload-identity middleware sets clientId `legacy:<client>`
+ * for legacy bearer tokens, but env-derived folder scopes (API_FOLDERS_<CLIENT>)
+ * are keyed as `<client>` lowercased. Without this normalization a scoped legacy
+ * token (`legacy:payroll`) misses the map and would be treated as UNRESTRICTED
+ * (a fail-OPEN read). Stripping the `legacy:` prefix (repeatedly, so
+ * `legacy:legacy:x` == `x`, F4 P2) and lowercasing makes the lookup match the
+ * middleware's subject so a scoped legacy client fails CLOSED to its folder.
+ *
+ * SECURITY (F4 P2): lowercase FIRST, then strip the (lowercased) `legacy:`
+ * prefix — repeatedly. Opaque workload-token subjects can be arbitrary case, so
+ * a mixed-case `Legacy:PAYROLL` must still normalize to `payroll`. Stripping
+ * before lowercasing would leave `legacy:payroll` (prefix not stripped) and the
+ * scope lookup would fail OPEN.
+ */
+export function scopeKey(clientId: string): string {
+  let stripped = clientId.toLowerCase();
+  while (stripped.startsWith("legacy:")) {
+    stripped = stripped.slice("legacy:".length);
+  }
+  return stripped;
+}
+
 export class FolderScope {
   /** folder name (lowercase) → VW folder ID */
   private folderNameToId = new Map<string, string>();
@@ -148,13 +173,7 @@ export class FolderScope {
    * scope and stays unrestricted.
    */
   private scopeKey(clientId: string): string {
-    // Strip the `legacy:` prefix defensively — repeatedly — so a malformed
-    // subject like `legacy:legacy:x` cannot key differently from `x` (F4 P2).
-    let stripped = clientId;
-    while (stripped.startsWith("legacy:")) {
-      stripped = stripped.slice("legacy:".length);
-    }
-    return stripped.toLowerCase();
+    return scopeKey(clientId);
   }
 
   /**

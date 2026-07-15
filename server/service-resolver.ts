@@ -63,7 +63,7 @@ function parseNotesTokens(notes: string | undefined | null): ParsedTokens {
 }
 
 function extractFields(
-  fields: Array<{ name: string; value: string; type: number }> | undefined
+  fields: Array<{ name: string; value: string; type: number }> | undefined,
 ): Record<string, string> {
   if (!fields) {
     return {};
@@ -89,7 +89,10 @@ function isApiItem(name: string): boolean {
   return /_api$/i.test(name) || /-api$/i.test(name);
 }
 
-function matchesServicePrefix(itemName: string, servicePrefix: string): boolean {
+function matchesServicePrefix(
+  itemName: string,
+  servicePrefix: string,
+): boolean {
   const lowerName = itemName.toLowerCase();
   const lowerPrefix = servicePrefix.toLowerCase();
 
@@ -107,10 +110,17 @@ function matchesServicePrefix(itemName: string, servicePrefix: string): boolean 
   return /^(_api|-api|\d)/.test(suffix);
 }
 
-function extractCredentialsFromFields(fields: Record<string, string>): ParsedTokens {
+function extractCredentialsFromFields(
+  fields: Record<string, string>,
+): ParsedTokens {
   return {
-    tokenId: fields['Token ID'] ?? fields['username'] ?? null,
-    tokenValue: fields['Token value'] ?? fields['Token Value'] ?? fields['password'] ?? fields['Secret'] ?? null,
+    tokenId: fields["Token ID"] ?? fields["username"] ?? null,
+    tokenValue:
+      fields["Token value"] ??
+      fields["Token Value"] ??
+      fields["password"] ??
+      fields["Secret"] ??
+      null,
   };
 }
 
@@ -120,8 +130,13 @@ function buildApiInfo(item: BitwVaultItem): ServiceApiInfo {
   const notesCreds = parseNotesTokens(item.notes);
 
   // Prefer login fields → custom fields → notes parsing
-  const username = item.login?.username ?? fieldCreds.tokenId ?? notesCreds.tokenId ?? null;
-  const password = item.login?.password ?? fieldCreds.tokenValue ?? notesCreds.tokenValue ?? null;
+  const username =
+    item.login?.username ?? fieldCreds.tokenId ?? notesCreds.tokenId ?? null;
+  const password =
+    item.login?.password ??
+    fieldCreds.tokenValue ??
+    notesCreds.tokenValue ??
+    null;
   const uri = item.login?.uris?.[0]?.uri ?? null;
 
   return {
@@ -152,10 +167,10 @@ function buildHostInfo(item: BitwVaultItem): ServiceHostInfo {
 
 export function resolveService(
   serviceName: string,
-  items: BitwVaultItem[]
+  items: BitwVaultItem[],
 ): ServiceInfo {
   const matchedItems = items.filter((item) =>
-    matchesServicePrefix(item.name, serviceName)
+    matchesServicePrefix(item.name, serviceName),
   );
 
   const apiItems = matchedItems.filter((item) => isApiItem(item.name));
@@ -165,9 +180,10 @@ export function resolveService(
   const api = apiItems.length > 0 ? buildApiInfo(apiItems[0]) : null;
   const additionalApiHosts = apiItems.slice(1).map(buildHostInfo);
 
-  const allHosts = [...hostItems.map(buildHostInfo), ...additionalApiHosts].sort(
-    (a, b) => a.itemName.localeCompare(b.itemName)
-  );
+  const allHosts = [
+    ...hostItems.map(buildHostInfo),
+    ...additionalApiHosts,
+  ].sort((a, b) => a.itemName.localeCompare(b.itemName));
 
   return {
     service: serviceName,
