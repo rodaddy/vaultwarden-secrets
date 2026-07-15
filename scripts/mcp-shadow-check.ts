@@ -272,6 +272,20 @@ try {
   process.exit(EXIT.CONFIG_ERROR);
 }
 
+// Guard (finding P1): shadow-checking an endpoint against ITSELF would always
+// report MATCH and give a false sense of cutover safety. If the normalized URLs
+// are identical, refuse to run and exit CONFIG_ERROR rather than a bogus MATCH.
+if (baseline.url === candidate.url) {
+  console.error(
+    JSON.stringify({
+      status: "CONFIG_ERROR",
+      detail:
+        "baseline and candidate resolve to the same MCP URL; supply two distinct endpoints",
+    }),
+  );
+  process.exit(EXIT.CONFIG_ERROR);
+}
+
 let baselineShapes: Awaited<ReturnType<typeof gather>>;
 let candidateShapes: Awaited<ReturnType<typeof gather>>;
 try {

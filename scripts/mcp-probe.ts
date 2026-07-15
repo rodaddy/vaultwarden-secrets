@@ -11,14 +11,21 @@
  * Configuration (env):
  *   VW_MCP_BASE_URL   Base MCP URL, e.g. http://the-production-host:3001/mcp
  *                     A bare origin (…:3001) is accepted; `/mcp` is appended.
- *   VW_MCP_TOKEN      Optional bearer token. If unset, the probe still verifies
- *                     that the endpoint enforces auth (401) — a healthy signal
- *                     for the auth layer, reported as AUTH_ENFORCED.
+ *   VW_MCP_TOKEN      Optional bearer token. If unset, the probe verifies that
+ *                     the endpoint enforces auth (401) and reports AUTH_ENFORCED.
+ *                     AUTH_ENFORCED is NOT full health — a real cutover gate
+ *                     must probe WITH a token and require HEALTHY.
  *   VW_MCP_TIMEOUT_MS Per-request timeout (default 5000).
+ *
+ * Flags:
+ *   --allow-auth-enforced   Treat AUTH_ENFORCED as success (exit 0). By default
+ *                           AUTH_ENFORCED exits 5 so an un-tokened probe cannot
+ *                           silently pass a health gate that intends HEALTHY.
  *
  * Exit-code contract (documented for cutover gates):
  *   0  HEALTHY        initialize + tools/list succeeded; tool count > 0.
- *   0  AUTH_ENFORCED  no token supplied and endpoint returned 401 (auth is up).
+ *   5  AUTH_ENFORCED  no token supplied and endpoint returned 401 (auth is up).
+ *                     Only becomes exit 0 with --allow-auth-enforced.
  *   2  UNHEALTHY      endpoint reachable but handshake/list failed or empty.
  *   3  UNREACHABLE    connection/timeout/DNS failure.
  *   4  CONFIG_ERROR   missing/invalid VW_MCP_BASE_URL.
@@ -31,7 +38,10 @@ const EXIT = {
   UNHEALTHY: 2,
   UNREACHABLE: 3,
   CONFIG_ERROR: 4,
+  AUTH_ENFORCED: 5,
 } as const;
+
+const ALLOW_AUTH_ENFORCED = process.argv.includes("--allow-auth-enforced");
 
 interface ProbeResult {
   ok: boolean;
@@ -223,10 +233,14 @@ async function probe(): Promise<ProbeResult> {
 const result = await probe();
 console.log(JSON.stringify(result));
 
+// The process exit code is the source of truth for gates. Do not wrap this in a
+// shell that appends `; echo $?` on the same line — a trailing echo would exit 0
+// and mask this code. Gates read the exit code directly.
 switch (result.status) {
   case "HEALTHY":
-  case "AUTH_ENFORCED":
     process.exit(EXIT.HEALTHY);
+  case "AUTH_ENFORCED":
+    process.exit(ALLOW_AUTH_ENFORCED ? EXIT.HEALTHY : EXIT.AUTH_ENFORCED);
   case "UNREACHABLE":
     process.exit(EXIT.UNREACHABLE);
   case "CONFIG_ERROR":
