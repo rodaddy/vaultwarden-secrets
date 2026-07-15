@@ -23,6 +23,31 @@ export interface MoveAliasInput {
   toVersion: number;
 }
 
+export interface MoveAliasCasInput extends MoveAliasInput {
+  /**
+   * Compare-and-swap guard: the version the caller believes the alias
+   * currently points at. `null`/`undefined` means "expected unset /
+   * first assignment". The read of the live alias, the comparison, and the
+   * write all happen inside a single transaction so a concurrent move cannot
+   * interleave.
+   */
+  expectedFromVersion?: number | null;
+}
+
+export class AliasCasError extends Error {
+  constructor(
+    readonly secret: string,
+    readonly alias: string,
+    readonly expected: number | null,
+    readonly actual: number | null,
+  ) {
+    super(
+      `CAS violation moving ${secret}:${alias} (expected ${expected}, actual ${actual})`,
+    );
+    this.name = "AliasCasError";
+  }
+}
+
 export interface ImportLegacyInput {
   name: string;
   payloadRef: string;
@@ -399,6 +424,52 @@ export function moveAlias(
     const target = requireVersion(tx, input.secret, input.toVersion);
     if (target.state === "DESTROYED")
       throw new Error("Aliases may not point to DESTROYED versions");
+    const now = new Date().toISOString();
+    tx.query(
+      `INSERT INTO secret_aliases (secret_name, alias, version, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(secret_name, alias) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at`,
+    ).run(input.secret, input.alias, input.toVersion, now);
+    auditMutation(
+      store,
+      tx,
+      "alias.move",
+      input.secret,
+      "moved",
+      `${input.secret}:${input.alias}:${input.toVersion}`,
+    );
+    return toVersion(target);
+  });
+}
+
+/**
+ * Atomic compare-and-swap alias move. Reads the live alias version, rejects
+ * with {@link AliasCasError} if it differs from `expectedFromVersion`
+ * (treating `null`/`undefined` expected as "currently unset"), then performs
+ * the move -- all inside one control-plane transaction so a concurrent move
+ * cannot slip between the check and the write.
+ */
+export function moveAliasCas(
+  store: ControlPlaneStore,
+  input: MoveAliasCasInput,
+): VersionMeta {
+  requireText(input.alias, "alias");
+  if (input.alias === "latest")
+    throw new Error("latest is managed automatically when versions are added");
+  const expected = input.expectedFromVersion ?? null;
+  return store.transaction((tx) => {
+    requireSecret(tx, input.secret);
+    const target = requireVersion(tx, input.secret, input.toVersion);
+    if (target.state === "DESTROYED")
+      throw new Error("Aliases may not point to DESTROYED versions");
+    const current = tx
+      .query(
+        "SELECT version FROM secret_aliases WHERE secret_name = ? AND alias = ?",
+      )
+      .get(input.secret, input.alias) as { version: number } | null;
+    const actual = current ? current.version : null;
+    if (actual !== expected) {
+      throw new AliasCasError(input.secret, input.alias, expected, actual);
+    }
     const now = new Date().toISOString();
     tx.query(
       `INSERT INTO secret_aliases (secret_name, alias, version, updated_at) VALUES (?, ?, ?, ?)

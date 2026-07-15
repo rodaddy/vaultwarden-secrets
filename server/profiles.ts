@@ -45,6 +45,12 @@ export interface SecurityProfile {
   writeConfirmation?: boolean;
   /** Restrict MCP access to items in these VW folders (empty = unrestricted) */
   folderScope?: string[];
+  /**
+   * Allowlisted systemd units a rotation may reload as consumers. Only units
+   * listed here may be named in a rotate_secret request; anything else is
+   * rejected by the rotation engine (allowlist-only, no caller commands).
+   */
+  rotationConsumers?: string[];
 }
 
 export const SecurityProfiles = {

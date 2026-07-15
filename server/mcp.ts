@@ -43,6 +43,19 @@ import {
   bwEditItem,
   bwDeleteItem,
 } from "./vault-client";
+import { Database } from "bun:sqlite";
+import { ControlPlaneStore } from "./control-plane/store";
+import { SqlitePolicyStore } from "./authz/policy-store";
+import { AuthorizationEngine } from "./authz/authz";
+import {
+  buildRotationEngine,
+  resolveConnector,
+  VaultWriterAdapter,
+  VaultReaderAdapter,
+  SystemdConsumerReloader,
+  type BwSession,
+} from "./rotation/wiring";
+import type { ConsumerAllowlist } from "./rotation/deps";
 
 // ============================================================================
 // Auth helper
@@ -154,6 +167,67 @@ async function findScopedItem(name: string): Promise<BitwVaultItem | null> {
 }
 
 // ============================================================================
+// Rotation infrastructure (pilot: GCP-Secret-Manager-style rotation)
+// ============================================================================
+
+/**
+ * Lazily-built rotation infrastructure shared across rotate_secret calls. The
+ * control-plane store owns versions/aliases/audit/outbox; the authz engine
+ * (default-deny) is built over the SAME control-plane DB so its policy table is
+ * migrated by the control-plane runner. A single rotation-job DB persists the
+ * durable job state machine. Everything is identifiers/hashes only -- the only
+ * material-touching adapter is the VaultWriter.
+ */
+interface RotationInfra {
+  controlPlane: ControlPlaneStore;
+  authz: AuthorizationEngine;
+  rotationDb: Database;
+  sessionProvider: () => Promise<BwSession>;
+  consumerAllowlist: ConsumerAllowlist;
+}
+
+let rotationInfra: RotationInfra | null = null;
+
+function getRotationInfra(): RotationInfra {
+  if (rotationInfra) return rotationInfra;
+  const controlPlane = new ControlPlaneStore({ actor: "mcp" });
+  // SqlitePolicyStore shares the control-plane DB (100_authz.sql already
+  // migrated by the control-plane migration runner).
+  const authz = new AuthorizationEngine(
+    new SqlitePolicyStore(controlPlane.database.db),
+  );
+  const rotationDbPath =
+    process.env.VW_ROTATION_DB ||
+    `${controlPlane.database.path}.rotation-jobs.db`;
+  const rotationDb = new Database(rotationDbPath, { create: true });
+
+  const sessionProvider = async (): Promise<BwSession> => {
+    const session = await getVaultSession("default");
+    if (!session) throw new Error("no vault session");
+    if (!writeFolderId) throw new Error("no write folder configured");
+    return { session, folderId: writeFolderId };
+  };
+
+  // Consumer reload allowlist from profile (systemd units only). Caller never
+  // supplies commands; unknown consumers are rejected by the engine.
+  const consumerAllowlist: ConsumerAllowlist = Object.fromEntries(
+    (profile.rotationConsumers ?? []).map((unit) => [
+      unit,
+      { kind: "systemd" as const, unit },
+    ]),
+  );
+
+  rotationInfra = {
+    controlPlane,
+    authz,
+    rotationDb,
+    sessionProvider,
+    consumerAllowlist,
+  };
+  return rotationInfra;
+}
+
+// ============================================================================
 // Tool result helpers
 // ============================================================================
 
@@ -168,7 +242,13 @@ const err = (msg: string) => ({
 // MCP Server factory
 // ============================================================================
 
-function createMcpServer(): McpServer {
+/**
+ * Build the MCP server for an authenticated subject. `subject` is the
+ * workload identity resolved by authenticateRequest at the `/mcp` boundary; it
+ * is used to authorize destructive tools (e.g. rotate_secret) through the same
+ * default-deny authz engine the REST/proxy paths use.
+ */
+function createMcpServer(subject: string): McpServer {
   const server = new McpServer({
     name: "vaultwarden-secrets",
     version: "0.7.0",
@@ -572,6 +652,98 @@ function createMcpServer(): McpServer {
         }
       },
     );
+
+    server.tool(
+      "rotate_secret",
+      "Rotate a credential with GCP-Secret-Manager-style guarantees: create a new version, prove it works, atomically move the alias, then revoke the old one (verify -> alias-move -> revoke). No downtime -- the old credential stays valid until the new one is verified. Authorized via default-deny authz; returns a REDACTED receipt (identifiers/hashes only, never material).",
+      {
+        credential: z
+          .string()
+          .describe("Logical secret/credential name to rotate"),
+        connector: z
+          .string()
+          .describe("Provider connector name (e.g. 'cloudflare')"),
+        strategy: z
+          .enum(["dual", "single"])
+          .optional()
+          .describe("Rotation strategy (default: dual)"),
+        consumers: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Allowlisted consumer units to reload after staging (must be in profile.rotationConsumers)",
+          ),
+        idempotencyKey: z
+          .string()
+          .describe("Request id; a duplicate returns the existing job"),
+        alias: z
+          .string()
+          .optional()
+          .describe("Alias to move on publish (default: 'current')"),
+        oldProviderRef: z
+          .string()
+          .optional()
+          .describe("Provider handle of the credential being superseded"),
+        oldPayloadRef: z
+          .string()
+          .optional()
+          .describe("Vault ref of the credential being superseded"),
+      },
+      { destructiveHint: true, idempotentHint: true },
+      async ({
+        credential,
+        connector,
+        strategy,
+        consumers,
+        idempotencyKey,
+        alias,
+        oldProviderRef,
+        oldPayloadRef,
+      }) => {
+        try {
+          const infra = getRotationInfra();
+          const vaultReader = new VaultReaderAdapter(infra.sessionProvider);
+          const connectorInstance = resolveConnector(connector, vaultReader);
+          if (!connectorInstance) {
+            return err(
+              `Error: connector "${connector}" is not available or not configured`,
+            );
+          }
+          const engine = buildRotationEngine(infra.rotationDb, {
+            store: infra.controlPlane,
+            authz: infra.authz,
+            connector: connectorInstance,
+            vault: new VaultWriterAdapter(infra.sessionProvider),
+            consumerAllowlist: infra.consumerAllowlist,
+            consumerReloader: new SystemdConsumerReloader(async (argv) => {
+              await $`${argv}`.quiet();
+            }),
+          });
+
+          // Redacted receipt: identifiers/hashes only (the type is already
+          // redacted). Subject is the authenticated workload identity; the
+          // engine authorizes rotate/move-alias/revoke via default-deny authz.
+          const receipt = await engine.rotate({
+            credential,
+            connector,
+            strategy: strategy ?? "dual",
+            consumers: consumers ?? [],
+            idempotencyKey,
+            subject,
+            alias,
+            oldProviderRef: oldProviderRef ?? null,
+            oldPayloadRef: oldPayloadRef ?? null,
+          });
+          return json(receipt);
+        } catch (error) {
+          // Errors surfaced here are pre-flight (authorization/allowlist) or
+          // already leak-guard-sanitized by the engine; never raw material.
+          return err(
+            `Error: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      },
+    );
   }
 
   // ------------------------------------------------------------------
@@ -586,7 +758,13 @@ function createMcpServer(): McpServer {
     "snapshot_info",
     "get_service",
     ...(profile.allowWrites
-      ? ["refresh_snapshot", "create_secret", "update_secret", "delete_secret"]
+      ? [
+          "refresh_snapshot",
+          "create_secret",
+          "update_secret",
+          "delete_secret",
+          "rotate_secret",
+        ]
       : []),
   ];
 
@@ -634,6 +812,7 @@ const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
  */
 async function createInitializedTransport(
   requestUrl: string,
+  subject: string,
 ): Promise<WebStandardStreamableHTTPServerTransport> {
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
@@ -646,7 +825,7 @@ async function createInitializedTransport(
     }
   };
 
-  const mcpServer = createMcpServer();
+  const mcpServer = createMcpServer(subject);
   await mcpServer.connect(transport);
 
   // Synthesize initialize handshake so the server is ready for tool calls
@@ -716,7 +895,7 @@ app.all("/mcp", async (c) => {
       transport.onclose = () => {
         if (transport.sessionId) transports.delete(transport.sessionId);
       };
-      const mcpServer = createMcpServer();
+      const mcpServer = createMcpServer(clientId);
       await mcpServer.connect(transport);
 
       const response = await transport.handleRequest(c.req.raw, {
@@ -734,7 +913,7 @@ app.all("/mcp", async (c) => {
       console.log(
         `[MCP] Auto-reconnecting stale session ${sessionId ?? "(none)"}`,
       );
-      transport = await createInitializedTransport(c.req.url);
+      transport = await createInitializedTransport(c.req.url, clientId);
 
       // Patch the request's session ID to match the new transport
       const headers = new Headers(c.req.raw.headers);
