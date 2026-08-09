@@ -42,10 +42,14 @@
     "get": "bun run cli.ts get",
     "cred-proxy": "bun run server/cred-proxy.ts",
     "identity": "bun run scripts/identity-admin.ts",
-    "drift-check": "bun run scripts/drift-check.ts"
+    "drift-check": "bun run scripts/drift-check.ts",
+    "mcp:v2": "bun run server/mcp-v2.ts",
+    "mcp:v2:done-means": "bun run scripts/mcp-v2-done-means.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "hono": "^4.11.7",
     "jose": "^6.1.3"
   },
