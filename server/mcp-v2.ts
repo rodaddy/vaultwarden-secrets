@@ -45,10 +45,23 @@
  *
  * mcp2cli#71 recorded a live `get_credential` response — a complete private key
  * — in cleartext in an unencrypted audit file. This server's request log is
- * built so that defect is not expressible: {@link logRequest} accepts only a
- * tool name, the SORTED KEY NAMES of the arguments, and a response BYTE COUNT.
- * It has no parameter to pass a value or a body through, so there is no call
- * site that could leak one even by mistake. Cardinality, not content.
+ * built so that defect is not expressible: `logRequest` accepts only a tool
+ * name, the arguments it derives KEY NAMES from, and a response BYTE COUNT. It
+ * has no parameter to pass a value or a body through, so there is no call site
+ * that could leak one even by mistake. Cardinality, not content.
+ *
+ * `logRequest` and `assertStrictSchema` live in `./mcp-v2-audit` because THIS
+ * module is an entry point — it resolves folder scope in a top-level `await`
+ * and binds a port, so a test cannot import it (observed: a `bun test` import
+ * hangs). Keeping those units importable is what lets them be asserted on
+ * directly; see `server/__tests__/mcp-v2-audit.test.ts`.
+ *
+ * ## Reconciliation with PR #40 (dev#113)
+ *
+ * Two lanes wrote `server/mcp-v2.ts` in this repo. Per ledger item 21 this file
+ * is the surviving implementation and #40's unique value was ported onto it —
+ * the behavioral strictness guard and the audit-record coverage. Rationale and
+ * the not-ported list are in `docs/compat/mcp-v2-parallel.md`.
  *
  * @module server/mcp-v2
  */
@@ -64,38 +77,16 @@ import { resolveIdentity } from "./middleware/workload-identity";
 import { getProfile } from "./profiles";
 import { resolveService } from "./service-resolver";
 import { resolveCredential } from "./credential-resolver";
+import { assertStrictSchema, logRequest } from "./mcp-v2-audit";
 
 // ============================================================================
 // Audit-safe request logging (mcp2cli#71)
 // ============================================================================
-
-/**
- * Log one tool call as CARDINALITY ONLY.
- *
- * The signature is the enforcement: there is deliberately no parameter that can
- * carry an argument value or a response body, so no call site can leak one.
- * `argKeys` are property NAMES (a schema fact, already public in `tools/list`);
- * `responseBytes` is a length. Neither can reconstruct a credential.
- *
- * Do not add a `value`, `payload`, `body`, or `result` parameter to this
- * function. That is precisely the change that produced mcp2cli#71.
- */
-function logRequest(
-  tool: string,
-  argKeys: string[],
-  responseBytes: number,
-  outcome: "ok" | "error",
-): void {
-  console.log(
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      tool,
-      argKeys: [...argKeys].sort(),
-      responseBytes,
-      outcome,
-    }),
-  );
-}
+//
+// `logRequest` and the strictness guard live in `./mcp-v2-audit` so they can be
+// unit-tested without importing THIS module, which resolves folder scope in a
+// top-level `await` and binds a port on import. See that module's header for
+// why the audit key derivation drops absent optionals.
 
 // ============================================================================
 // Auth — identical backend to v1
@@ -295,11 +286,32 @@ function buildServer(subject: string): McpServer {
     },
   );
 
+  // Every tool below is registered through the SDK's own `registerTool`, but
+  // routed past `assertStrictSchema` first so a schema that only LOOKS strict
+  // cannot reach the wire. The advertised JSON Schema is not sufficient
+  // evidence: on the installed Zod a permissive `z.object({...})` emits the
+  // same `additionalProperties: false` as a strict one, so this probes runtime
+  // parse behavior instead (see `./mcp-v2-audit`). Registration-time failure is
+  // deliberate — a silently-dropped param on a SECRETS tool is the defect this
+  // whole server tightened against, and catching it at request time would mean
+  // shipping it.
+  const registerTool: typeof server.registerTool = (name, config, handler) => {
+    assertStrictSchema(
+      name as string,
+      (config as { inputSchema: z.ZodObject<z.ZodRawShape> }).inputSchema,
+    );
+    return server.registerTool(
+      name as never,
+      config as never,
+      handler as never,
+    );
+  };
+
   // ------------------------------------------------------------------
   // READ TOOLS
   // ------------------------------------------------------------------
 
-  server.registerTool(
+  registerTool(
     "snapshot_info",
     {
       description: "Get vault snapshot metadata (age, item count, staleness)",
@@ -310,11 +322,16 @@ function buildServer(subject: string): McpServer {
       inputSchema: z.strictObject({}),
     },
     async (args) => {
-      const argKeys = Object.keys(args ?? {});
+      const auditArgs = args ?? {};
       try {
         const metadata = await snapshotManager.getMetadata();
         const out = metadata ? json(metadata) : text("No snapshot exists");
-        logRequest("snapshot_info", argKeys, JSON.stringify(out).length, "ok");
+        logRequest(
+          "snapshot_info",
+          auditArgs,
+          JSON.stringify(out).length,
+          "ok",
+        );
         return out;
       } catch (error) {
         const out = err(
@@ -322,7 +339,7 @@ function buildServer(subject: string): McpServer {
         );
         logRequest(
           "snapshot_info",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           "error",
         );
@@ -331,7 +348,7 @@ function buildServer(subject: string): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_secrets",
     {
       description: "List available secrets with optional filter",
@@ -345,13 +362,13 @@ function buildServer(subject: string): McpServer {
       }),
     },
     async ({ filter, vault }) => {
-      const argKeys = Object.keys({ filter, vault });
+      const auditArgs = { filter, vault };
       try {
         const vaultErr = rejectNonDefaultVault(vault);
         if (vaultErr) {
           logRequest(
             "list_secrets",
-            argKeys,
+            auditArgs,
             JSON.stringify(vaultErr).length,
             "error",
           );
@@ -360,7 +377,7 @@ function buildServer(subject: string): McpServer {
         let secrets = await listSecrets(filter || undefined, { vault });
         secrets = await filterByScope(secrets);
         const out = json(secrets);
-        logRequest("list_secrets", argKeys, JSON.stringify(out).length, "ok");
+        logRequest("list_secrets", auditArgs, JSON.stringify(out).length, "ok");
         return out;
       } catch (error) {
         const out = err(
@@ -368,7 +385,7 @@ function buildServer(subject: string): McpServer {
         );
         logRequest(
           "list_secrets",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           "error",
         );
@@ -377,7 +394,7 @@ function buildServer(subject: string): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "search_secrets",
     {
       description: "Fuzzy search for secrets by name",
@@ -389,13 +406,13 @@ function buildServer(subject: string): McpServer {
       }),
     },
     async ({ query, limit, vault }) => {
-      const argKeys = Object.keys({ query, limit, vault });
+      const auditArgs = { query, limit, vault };
       try {
         const vaultErr = rejectNonDefaultVault(vault);
         if (vaultErr) {
           logRequest(
             "search_secrets",
-            argKeys,
+            auditArgs,
             JSON.stringify(vaultErr).length,
             "error",
           );
@@ -429,7 +446,12 @@ function buildServer(subject: string): McpServer {
           .slice(0, limit);
 
         const out = json(scored);
-        logRequest("search_secrets", argKeys, JSON.stringify(out).length, "ok");
+        logRequest(
+          "search_secrets",
+          auditArgs,
+          JSON.stringify(out).length,
+          "ok",
+        );
         return out;
       } catch (error) {
         const out = err(
@@ -437,7 +459,7 @@ function buildServer(subject: string): McpServer {
         );
         logRequest(
           "search_secrets",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           "error",
         );
@@ -446,7 +468,7 @@ function buildServer(subject: string): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_secret",
     {
       description: "Get a secret value by name",
@@ -461,13 +483,13 @@ function buildServer(subject: string): McpServer {
       }),
     },
     async ({ name, vault }) => {
-      const argKeys = Object.keys({ name, vault });
+      const auditArgs = { name, vault };
       try {
         const vaultErr = rejectNonDefaultVault(vault);
         if (vaultErr) {
           logRequest(
             "get_secret",
-            argKeys,
+            auditArgs,
             JSON.stringify(vaultErr).length,
             "error",
           );
@@ -482,7 +504,7 @@ function buildServer(subject: string): McpServer {
           );
           logRequest(
             "get_secret",
-            argKeys,
+            auditArgs,
             JSON.stringify(out).length,
             "error",
           );
@@ -492,19 +514,24 @@ function buildServer(subject: string): McpServer {
         const value = await getSecret(name, { vault });
         const out = text(value);
         // Byte count only. The value never reaches the log.
-        logRequest("get_secret", argKeys, JSON.stringify(out).length, "ok");
+        logRequest("get_secret", auditArgs, JSON.stringify(out).length, "ok");
         return out;
       } catch (error) {
         const out = err(
           `Error: ${error instanceof Error ? error.message : String(error)}`,
         );
-        logRequest("get_secret", argKeys, JSON.stringify(out).length, "error");
+        logRequest(
+          "get_secret",
+          auditArgs,
+          JSON.stringify(out).length,
+          "error",
+        );
         return out;
       }
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_secret_fields",
     {
       description: "Get all fields for a secret item",
@@ -515,13 +542,13 @@ function buildServer(subject: string): McpServer {
       }),
     },
     async ({ name, vault }) => {
-      const argKeys = Object.keys({ name, vault });
+      const auditArgs = { name, vault };
       try {
         const vaultErr = rejectNonDefaultVault(vault);
         if (vaultErr) {
           logRequest(
             "get_secret_fields",
-            argKeys,
+            auditArgs,
             JSON.stringify(vaultErr).length,
             "error",
           );
@@ -535,7 +562,7 @@ function buildServer(subject: string): McpServer {
           );
           logRequest(
             "get_secret_fields",
-            argKeys,
+            auditArgs,
             JSON.stringify(out).length,
             "error",
           );
@@ -546,7 +573,7 @@ function buildServer(subject: string): McpServer {
         const out = json(fields);
         logRequest(
           "get_secret_fields",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           "ok",
         );
@@ -557,7 +584,7 @@ function buildServer(subject: string): McpServer {
         );
         logRequest(
           "get_secret_fields",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           "error",
         );
@@ -566,7 +593,7 @@ function buildServer(subject: string): McpServer {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_service",
     {
       description:
@@ -579,7 +606,7 @@ function buildServer(subject: string): McpServer {
       }),
     },
     async ({ service }) => {
-      const argKeys = Object.keys({ service });
+      const auditArgs = { service };
       try {
         const snapshot = await snapshotManager.load();
         if (!snapshot) {
@@ -588,7 +615,7 @@ function buildServer(subject: string): McpServer {
           );
           logRequest(
             "get_service",
-            argKeys,
+            auditArgs,
             JSON.stringify(out).length,
             "error",
           );
@@ -604,7 +631,7 @@ function buildServer(subject: string): McpServer {
           );
           logRequest(
             "get_service",
-            argKeys,
+            auditArgs,
             JSON.stringify(out).length,
             "error",
           );
@@ -612,19 +639,24 @@ function buildServer(subject: string): McpServer {
         }
 
         const out = json(result);
-        logRequest("get_service", argKeys, JSON.stringify(out).length, "ok");
+        logRequest("get_service", auditArgs, JSON.stringify(out).length, "ok");
         return out;
       } catch (error) {
         const out = err(
           `Error: ${error instanceof Error ? error.message : String(error)}`,
         );
-        logRequest("get_service", argKeys, JSON.stringify(out).length, "error");
+        logRequest(
+          "get_service",
+          auditArgs,
+          JSON.stringify(out).length,
+          "error",
+        );
         return out;
       }
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_credential",
     {
       description:
@@ -646,13 +678,13 @@ function buildServer(subject: string): McpServer {
       }),
     },
     async ({ query, field, vault }) => {
-      const argKeys = Object.keys({ query, field, vault });
+      const auditArgs = { query, field, vault };
       try {
         const vaultErr = rejectNonDefaultVault(vault);
         if (vaultErr) {
           logRequest(
             "get_credential",
-            argKeys,
+            auditArgs,
             JSON.stringify(vaultErr).length,
             "error",
           );
@@ -675,7 +707,7 @@ function buildServer(subject: string): McpServer {
         // any log line here.
         logRequest(
           "get_credential",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           outcome.ok ? "ok" : "error",
         );
@@ -686,7 +718,7 @@ function buildServer(subject: string): McpServer {
         );
         logRequest(
           "get_credential",
-          argKeys,
+          auditArgs,
           JSON.stringify(out).length,
           "error",
         );

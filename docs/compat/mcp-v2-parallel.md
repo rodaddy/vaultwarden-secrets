@@ -152,3 +152,66 @@ error codes, key names, and byte counts.
   call sites use.
 - **No deployment.** No systemd unit, no Ansible, no CT 214 change.
 - **No cutover.** `services.json` still points at 3001 and is not edited here.
+
+## Reconciliation with PR #40 (dev#113), ledger item 21
+
+**Truth state: WRITTEN.** Two lanes independently wrote `server/mcp-v2.ts` in
+this repo — dev#112 (this branch, PR #41) and dev#113 (PR #40, branch
+`feat/mcp-v2-113`). The controller ticket-split conflated two SERVICES
+(`vaultwarden-secrets` CT 214, `king-secrets` CT 109) that share ONE repo. One
+v2 implementation has to serve both deployments, so this branch is the base and
+#40's unique value was ported onto it rather than merged as a second server.
+
+What was taken from #40, adapted to this branch's implementation:
+
+1. **The behavioral schema-strictness guard** (`assertStrictSchema`). #40's
+   finding is the reason it probes runtime parse behavior instead of reading the
+   emitted JSON Schema: on the installed Zod, `z.toJSONSchema()` emits
+   `additionalProperties: false` for a PERMISSIVE `z.object({...})` as well as
+   for a strict one. A guard that introspected the advertised schema would pass
+   a permissive schema straight through — the exact silent-drop defect it exists
+   to prevent. This branch had strict schemas but no guard *enforcing* that they
+   stay strict; every `registerTool` call now routes through it.
+2. **Audit-record unit coverage**, including #40's nested/non-object argument
+   cases. Porting it surfaced a live defect on this branch: all seven tools
+   derived audit keys as `Object.keys({ filter, vault })` over DESTRUCTURED
+   optionals, which reports a key whose value is `undefined`. A caller sending
+   `{}` to `list_secrets` was audited as having sent `["filter","vault"]`.
+   Audit fidelity is the point of the record (ledger 16), so the derivation was
+   fixed once at the owning boundary in `server/mcp-v2-audit.ts` rather than at
+   seven call sites.
+
+What was NOT ported, and why:
+
+- **#40's `server/mcp-v2.ts`.** One implementation, per ledger 21. #40's server
+  was a smaller stub-tool module; this branch's has the seven real read tools,
+  folder scoping, non-default-vault rejection, and identity resolution.
+- **#40's `routeEra` + its unawaited-`isLegacyRequest` regression test.** #40
+  hand-rolled era routing and caught a real bug in its own wrapper: an unawaited
+  `isLegacyRequest` returns a truthy Promise, classifying every request as
+  legacy. This branch has no such wrapper — it delegates era routing entirely to
+  the SDK via `createMcpHandler(..., { legacy: "stateless" })`, so the defect is
+  not expressible here. Adding a `routeEra` function purely to host the
+  regression test would introduce the very code path the test guards against.
+  The dual-era behavior it protects is covered end-to-end instead by done-means
+  clause **B2**, which drives a 2025-era `initialize` against the same running
+  instance that serves 2026-07-28.
+- **#40's wire-level protocol tests** (handshake-free call, `-32020` mismatch,
+  GET→405, auth boundary). All four are already covered against a REAL running
+  server by done-means clauses A/C/B2 and the auth path, which is stronger
+  evidence than the same assertions against an in-process handler.
+
+Why the ported units live in `server/mcp-v2-audit.ts` and not in
+`server/mcp-v2.ts`: the latter is an ENTRY POINT. It resolves folder scope in a
+top-level `await` and default-exports a bound server, so importing it from a
+test starts a server and hangs — observed 2026-08-09, a `bun test` import timed
+out at 5000ms without reaching an assertion. The audit and strictness units are
+the ones worth asserting on directly, so they live where a test can import them
+without booting anything.
+
+Non-vacuity: each ported behavior was mutation-tested (2026-08-09). Reverting
+`auditKeys` to the naive `Object.keys` fails 2 tests; making the audit record
+copy argument values fails 3; making the strictness guard introspect
+`z.toJSONSchema()` instead of probing behavior fails 2; and changing one real
+tool's schema to a permissive `z.object` makes the running server refuse that
+tool at request time with the guard's own message.
