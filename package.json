@@ -45,7 +45,9 @@
     "drift-check": "bun run scripts/drift-check.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "hono": "^4.11.7",
     "jose": "^6.1.3"
   },
