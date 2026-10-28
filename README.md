@@ -482,6 +482,16 @@ bun run typecheck
 
 ---
 
+## How it was built
+
+The library, CLI and HTTP server were built in February 2026; the MCP server
+and credential proxy for AI agents followed within a week. In July 2026 the
+control plane was rebuilt as a planned goal run with a written decision log,
+a compatibility baseline that protected the live service, and an adversarial
+review of each slice before merge (the rotation engine alone had 8 P0 and 5
+P1 findings fixed). The full account is in
+[docs/BUILD-STORY.md](docs/BUILD-STORY.md).
+
 ## Project status
 
 Active. The library, REST API, MCP server, credential proxy, control plane and rotation engine are deployed by the author and covered by the test suite (`bun test`). An MCP `2026-07-28` server (`server/mcp-v2.ts`) is written and tested locally but is not yet the default entry point.
