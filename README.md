@@ -459,7 +459,7 @@ bun test          # run the suite
 bun run typecheck # tsc --noEmit
 ```
 
-The suite spans 29 test files across the library, control plane, rotation engine, authz, identity, middleware, and the MCP contract. Deeper security-profile testing notes: [docs/testing.md](docs/testing.md).
+The suite spans 30 test files across the library, control plane, rotation engine, authz, identity, middleware, and the MCP contract. Deeper security-profile testing notes: [docs/testing.md](docs/testing.md).
 
 > **Fixture convention:** test fixtures use obviously-fake credential values (`test-`/`fake-` prefixed, e.g. `test-secret`, `test-value-abc`) so secret scanners don't false-positive on the test data. Please keep any new fixtures fake and clearly prefixed.
 
@@ -481,6 +481,16 @@ bun run typecheck
 **Reporting a vulnerability:** please open a private security report on the repository rather than a public issue.
 
 ---
+
+## How it was built
+
+The library, CLI and HTTP server were built in February 2026; the MCP server
+and credential proxy for AI agents followed within a week. In July 2026 the
+control plane was rebuilt as a planned goal run with a written decision log,
+a compatibility baseline that protected the live service, and an adversarial
+review of each slice before merge (the rotation engine alone had 8 P0 and 5
+P1 findings fixed). The full account is in
+[docs/BUILD-STORY.md](docs/BUILD-STORY.md).
 
 ## Project status
 
