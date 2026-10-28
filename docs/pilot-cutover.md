@@ -1,0 +1,218 @@
+# Pilot cutover: the MCP consumer as the first migrated workload (#22)
+
+This documents the one real workload migrated onto the new control plane +
+rotation engine: the **MCP server** (`server/mcp.ts`, port `3001`,
+`vaultwarden-secrets-mcp.service`). It is the pilot consumer that proves the
+end-to-end path — MCP compatibility, control-plane-backed rotation, and
+no-downtime credential replacement — against real components rather than
+fakes. Everything below is scoped to what the code actually does.
+
+## What "migrated" means here
+
+The MCP server keeps its frozen read/write tool contract (verified by
+`server/__tests__/mcp-contract.test.ts`) and gains one additive,
+`allowWrites`-gated tool: **`rotate_secret`**. The tool constructs a
+`RotationEngine` (`server/rotation/engine.ts`) wired to the REAL merged modules
+through `server/rotation/wiring.ts`:
+
+- Control plane: `server/control-plane/store.ts` (`ControlPlaneStore`) —
+  immutable versions, aliases, audit ledger, outbox — behind
+  `ControlPlaneStoreAdapter`.
+- Authorization: `server/authz` `AuthorizationEngine` (default-deny) behind
+  `makeAuthorize`, over a `SqlitePolicyStore` sharing the control-plane DB.
+- Vault I/O: `server/vault-client.ts` behind `VaultWriterAdapter` /
+  `VaultReaderAdapter` (the only material-touching components).
+- Consumer reload: allowlist-only `SystemdConsumerReloader` (systemd units from
+  `profile.rotationConsumers`; caller-supplied commands are never accepted).
+
+The tool count under `im-aware` therefore moves from **10 to 11**. This is the
+deliberate contract evolution the compatibility guard (`docs/compat/cutover-gates.md`)
+now records; every other tool's schema is unchanged.
+
+## GCP-Secret-Manager-style rotation for this workload
+
+`rotate_secret` drives the engine's durable state machine, which enforces the
+no-downtime ordering **create → stage → reload consumers → verify → alias-move
+→ revoke**:
+
+1. **create** — the connector mints a replacement at the provider and stages
+   the new material via the arming `VaultWriter`. The engine only ever sees a
+   `payloadRef` + `checksum`, never the material.
+2. **stage** — the new material is registered as a new immutable **version** in
+   the control plane (`addVersion`). The old version is untouched and still
+   ENABLED.
+3. **verify** — the connector probes **as the new credential**. If verify
+   fails, the engine fails closed: no alias move, no revoke, the old credential
+   stays live, and a bounded rollback deletes only the just-created new
+   credential.
+4. **alias-move** — only after verify passes does the alias (`current`) move to
+   the new version, under a **compare-and-swap** guard (`expectedFromVersion`)
+   enforced atomically by `store.moveAliasCas` (read-alias + check + write in
+   one control-plane transaction). A concurrent rotation that moved the alias
+   out from under this one loses the CAS and cannot publish a stale version.
+5. **revoke** — only after the alias is published is the **old** provider
+   credential revoked. First-issuance has no old credential and advances
+   directly.
+
+The invariant that gives **no downtime**: the old credential remains valid
+until the new one is proven (verify) and published (alias-move). Any failure
+after publish never rolls back — it fails closed to `reconcile-required`, so a
+published-but-partially-completed rotation is surfaced for repair rather than
+silently reverted. This mirrors GCP Secret Manager's add-version /
+move-alias / disable-old lifecycle.
+
+### No secret material crosses the boundary
+
+The engine's `LeakGuard` arms on the generated material and scans every
+persisted row, audit entry, outbox event, receipt, and sanitized error. The
+wiring preserves the control plane's own redaction (the store rejects
+secret-looking audit/outbox values and reconciliation-evidence keys matching
+`password|token|secret|credential|payload|private_key`). The returned
+`RotationReceipt` is identifiers/hashes only. End-to-end non-leak is asserted
+in `server/rotation/__tests__/wiring.test.ts`
+("drives a first-issuance rotation to done with no material leak").
+
+## Shadow-check / rollback / recovery story
+
+The pilot reuses the compatibility harness already established for #23; no new
+cutover tooling was needed.
+
+### Shadow check (pre-cutover, no service stopped)
+
+`scripts/mcp-shadow-check.ts` runs the same non-secret read operations against
+the live baseline and the candidate and compares **normalized shapes only**
+(redacted hashes; never values). It compares `tools/list` (names + required
+inputs), `snapshot_info` (key set + value types), and `list_secrets` (envelope
+shape). Gate **C1** in `docs/compat/cutover-gates.md` requires `0 / N`
+divergence over `N=20` runs before promotion. Because `rotate_secret` is a new
+tool, a shadow check between a pre-#22 baseline and this candidate is EXPECTED
+to diverge on `tools/list`; the candidate's own frozen baseline is
+`server/__tests__/mcp-contract.test.ts` (now 11 tools).
+
+### Probe (health gate)
+
+`scripts/mcp-probe.ts` runs `initialize` + `tools/list` with a token and exits
+`0` only on `HEALTHY` with the expected `toolCount`. It gates the baseline
+(P2), the candidate (P4), and the post-promotion service (C3).
+
+### Rollback and recovery
+
+- **Cutover rollback (R1, `docs/compat/cutover-gates.md`):** the promotion is a
+  `systemctl restart` of the unit against a captured commit anchor
+  (`/root/vw-rollback-anchor`); the active service is never stopped before the
+  replacement is proven. Rollback re-checks out the anchor revision and
+  restarts in place. Rollback is complete only when the probe is `HEALTHY`, the
+  contract test is green, and the required timers are active.
+- **Rotation-level recovery:** the rotation engine is crash-safe and
+  resumable. `RotationEngine.resumePending()` reclaims expired leases and
+  continues each non-terminal job from its persisted stage. A failure after
+  publish routes to `reconcile-required` (surfaced via
+  `markReconcileRequired`, bridged to the control plane's operation-based
+  reconciliation records) instead of an unsafe revert. A failed pre-publish
+  rotation rolls back only the new credential, leaving the old one intact.
+
+## Known bound: audit/outbox emission is best-effort; the STAGE checkpoint is durable (F3)
+
+The rotation-job durability (`rotation_jobs` / `rotation_checkpoints`) lives in
+a **separate SQLite database** from the control-plane audit ledger + outbox
+(`audit_ledger` / `outbox_events`). Per transition the engine writes the fenced
+job update + checkpoint (rotation DB) and then, as a **separate** step, awaits
+`emit`, which the wiring adapters (`AuditAdapter`/`OutboxAdapter` in
+`server/rotation/wiring.ts`) commit in their **own** control-plane transaction.
+A single transaction cannot span the two databases, and the engine/`deps.ts`
+contract is intentionally not modified, so a cross-store atomic write is out of
+scope here.
+
+**What is durable: the fenced STAGE checkpoint.** The authoritative record of
+effect-applied progress is the fenced `updateJob` + `rotation_checkpoints` write
+in the rotation DB, committed *before* the audit/outbox emit for that stage.
+This is what drives `resumePending()` and what tells the system which effects
+(create, stage, alias-move, revoke) have been applied. It is durable at every
+stage, terminal and non-terminal alike.
+
+**What is best-effort: the audit/outbox EMISSION at each stage boundary.**
+Because the emit happens in a distinct transaction *after* the checkpoint
+commits, a crash in the window between the two drops that stage's
+`rotation.<stage>` ledger row and `rotation.<stage>.<outcome>` outbox event —
+for **any** stage, including `old-revoked` and the terminal `done`. The claim
+that a given stage's ledger/outbox row is durable-with-the-checkpoint does
+**not** hold; only the checkpoint itself is.
+
+- For a **non-terminal** stage, the miss is self-healing: the job is still
+  non-terminal, so `resumePending()` re-drives it and the stage re-emits. Under
+  the delivered rotation (no mid-flight crash) every pre-terminal stage's
+  audit + outbox row is present — proven by
+  `server/rotation/__tests__/wiring.test.ts` → "F3: every PRE-terminal stage's
+  audit+outbox is durably committed" (a durability check of the emitted rows on
+  the happy path, not a crash-durability guarantee).
+- For the **terminal** `old-revoked → done` transition, there is no resume: the
+  job is already terminal and excluded from `resumePending()`, so a crash
+  between the terminal checkpoint and its emit leaves the `rotation.done` /
+  `rotation.old-revoked` audit + outbox rows **permanently absent**.
+
+This never affects rotation **correctness** — the effects (alias published, old
+credential revoked) are applied and durably recorded by the fenced checkpoints;
+only the *notifications* are best-effort. A durable-with-checkpoint or
+replay-based fix would require an engine change (same-transaction emit) or a
+cross-store reconcile pass, both deferred. Consumers that must observe an
+outcome should treat the durable job **stage** in `rotation_jobs` (e.g. terminal
+`done`, or `old-revoked` reached) as authoritative, not the corresponding
+`rotation.*` audit/outbox event.
+
+## REST enumeration parity (PR-D deferred item, closed here)
+
+The get / list / fields REST endpoints (`server/routes/secrets-read.ts`, wired
+from `server/main.ts`) now route every authorization denial AND every
+backend/lookup error through one canonical, byte-identical `404`
+`{"error":"Secret not found"}` (`normalizeDenial` from `server/authz/authz.ts`).
+No raw `Error.message` and no conditional `503`/`500` can distinguish denied,
+not-found, and backend-error cases, so callers cannot enumerate which secrets
+exist or which they may access. Byte-equivalence is proven in
+`server/__tests__/secrets-read-parity.test.ts`.
+
+## Verification summary
+
+- `bun test server/__tests__/mcp-contract.test.ts` — frozen contract (now 11
+  tools) green.
+- `bun test server/rotation/__tests__/wiring.test.ts` — adapter hazards (CAS,
+  audit/outbox tx, reconcile shape), least-privilege rotation authz
+  (`rotate.revoke`/`rotate.rollback` vs `secret.destroy`, F2), server-side
+  revoke-target derivation including newest-published-job and per-secret
+  idempotency scoping (F1), happy-path stage emission (F3), vault checksum
+  non-leak, and full end-to-end rotations against the real control-plane store.
+- `bun test server/__tests__/secrets-read-parity.test.ts` — REST byte-equivalence.
+- `bun test server/__tests__/folder-scope-legacy.test.ts` — legacy scoped token
+  fails closed to its folder (F4).
+- Cutover gates: `docs/compat/cutover-gates.md` (probe P2/P4/C3, shadow C1,
+  rollback R1).
+
+## Security fixes from adversarial review
+
+- **F1 (P0):** `rotate_secret` no longer accepts `oldProviderRef`/`oldPayloadRef`
+  from the caller. The revoke target is derived server-side via
+  `resolveSupersededRefs`, which reads the most recent **published** rotation
+  job for THIS secret (`getLastPublishedJob`: stage in
+  `done`/`old-revoked`/`reconcile-required` with a recorded provider handle),
+  so a caller authorized to rotate secretA can never cause a provider-side
+  GET/DELETE against an unrelated credential id. Selecting the newest *published*
+  job — not merely the newest `done` one — ensures a rotation that published
+  then failed its revoke (`reconcile-required`) is the revoke target, so the
+  actually-live stale credential is the one revoked (F1 stale-job fix). The MCP
+  tool also namespaces the caller idempotency key by credential
+  (`<credential>\x1f<key>`), scoping it per-secret so a reused key cannot return
+  or suppress another secret's rotation.
+- **F2 (P1):** rotation revoke/rollback are first-class authz actions
+  (`rotate.revoke`, `rotate.rollback`) rather than overloaded `secret.destroy`,
+  restoring least-privilege — a rotate role completes rotation without
+  `secret.destroy`, and `secret.destroy` alone grants no rotation capability.
+- **F3 (P1):** documented above as a known bound — the fenced job **stage
+  checkpoint** is the durable, authoritative record; audit/outbox **emission**
+  is best-effort at every stage boundary (self-healing for non-terminal stages
+  via resume, permanently missable for terminal `done`). The atomic fix is out
+  of scope without changing the engine or spanning two databases.
+- **F4 (P0):** `FolderScope` normalizes `legacy:<client>` subjects to the scope
+  key `<client>` (stripping the prefix defensively, even if doubled), and a
+  client that is **configured** as restricted fails **closed** — denying all
+  items — when its folders do not resolve or before init completes, rather than
+  falling through to unrestricted. Genuinely-unconfigured clients (RICO) stay
+  unrestricted.

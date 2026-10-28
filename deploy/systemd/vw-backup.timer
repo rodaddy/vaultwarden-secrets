@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted Vaultwarden Secrets state backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=vw-backup.service
+
+[Install]
+WantedBy=timers.target

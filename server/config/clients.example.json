@@ -1,0 +1,14 @@
+{
+  "clients": [
+    {
+      "id": "client-1",
+      "secret": "change-this-secret-in-production",
+      "name": "Example Client 1"
+    },
+    {
+      "id": "my-app",
+      "secret": "another-secure-secret",
+      "name": "My Application"
+    }
+  ]
+}

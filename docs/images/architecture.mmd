@@ -1,0 +1,34 @@
+flowchart TB
+  APPS["apps, scripts, AI agents"]
+  CLI["cli.ts / bin/secret"]
+  subgraph SVC["services (server/)"]
+    direction LR
+    REST["REST API<br/>main.ts :3000"]
+    MCP["MCP server<br/>mcp.ts :3001"]
+    PROXY["credential proxy<br/>cred-proxy.ts :3003"]
+  end
+  subgraph ACCESS["shared access path"]
+    direction LR
+    ID["identity/<br/>vwsk_ workload tokens"] --> AUTHZ["authz/<br/>default-deny policy"]
+  end
+  subgraph LIB["secrets library (index.ts)"]
+    direction LR
+    CACHE["cache.ts<br/>encrypted LRU cache"]
+    SNAP["snapshot.ts<br/>encrypted snapshot fallback"]
+  end
+  subgraph CPL["control plane"]
+    direction LR
+    CP["control-plane/ (SQLite)<br/>versions, aliases, audit ledger, outbox"]
+    ROT["rotation/<br/>engine + connectors"]
+  end
+  BW["bw CLI"]
+  VW[("Vaultwarden / Bitwarden vault")]
+
+  APPS --> SVC
+  SVC --> ACCESS
+  ACCESS --> LIB
+  ACCESS --> CPL
+  CLI --> LIB
+  ROT --> CP
+  LIB --> BW --> VW
+  ROT -->|"create, verify, move alias, revoke"| BW

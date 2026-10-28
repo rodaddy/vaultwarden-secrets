@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+bun.lockb
+
+# Build output
+dist/
+*.js
+*.js.map
+*.d.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Secrets & credentials (NEVER commit!)
+.env
+.env.*
+.master-key
+.vw-cache.json
+.bw_session*
+snapshot.enc
+
+# Working files (implementation notes, session context)
+.working/
+.reports/
+.server.log
+.server.pid
+deploy/tls/
+
+# Added by ggshield
+.cache_ggshield

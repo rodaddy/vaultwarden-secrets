@@ -1,0 +1,14 @@
+{
+  "allowedFingerprints": [
+    "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+  ],
+  "_comment": "Generate client certificates and extract fingerprints using:",
+  "_instructions": [
+    "1. Generate client cert: openssl req -new -x509 -days 365 -nodes -out client.crt -keyout client.key",
+    "2. Get fingerprint: openssl x509 -in client.crt -noout -fingerprint -sha256 | sed 's/://g' | awk -F= '{print \"sha256:\"tolower($2)}'",
+    "3. Add fingerprint to allowedFingerprints array above",
+    "4. Copy this file to /opt/vaultwarden-secrets/certs.json",
+    "5. Set ALLOWED_CLIENT_CERTS=/opt/vaultwarden-secrets/certs.json"
+  ]
+}
