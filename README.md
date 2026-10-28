@@ -459,7 +459,7 @@ bun test          # run the suite
 bun run typecheck # tsc --noEmit
 ```
 
-The suite spans 29 test files across the library, control plane, rotation engine, authz, identity, middleware, and the MCP contract. Deeper security-profile testing notes: [docs/testing.md](docs/testing.md).
+The suite spans 30 test files across the library, control plane, rotation engine, authz, identity, middleware, and the MCP contract. Deeper security-profile testing notes: [docs/testing.md](docs/testing.md).
 
 > **Fixture convention:** test fixtures use obviously-fake credential values (`test-`/`fake-` prefixed, e.g. `test-secret`, `test-value-abc`) so secret scanners don't false-positive on the test data. Please keep any new fixtures fake and clearly prefixed.
 
